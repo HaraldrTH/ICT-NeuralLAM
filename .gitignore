@@ -1,12 +1,9 @@
 ### Project Specific ###
-wandb
 slurm_log*
-saved_models
-data
-graphs
 *.sif
 sweeps
 test_*.sh
+data
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
@@ -73,3 +70,5 @@ tags
 # Coc configuration directory
 .vim
 
+.venv
+.venv-paper
