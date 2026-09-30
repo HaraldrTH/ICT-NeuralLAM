@@ -197,7 +197,12 @@ class ARModel(pl.LightningModule):
 
         returns: (K*d1, d2, ...)
         """
-        return self.all_gather(tensor_to_gather).flatten(0, 1)
+        gathered = self.all_gather(tensor_to_gather)
+
+        if self.trainer.world_size == 1:
+            return gathered
+
+        return gathered.flatten(0, 1)
 
     def validation_step(self, batch, batch_idx):
         """

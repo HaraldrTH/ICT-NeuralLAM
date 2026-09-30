@@ -26,7 +26,7 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         member_file_regexp = "nwp*mbr000.npy" if control_only else "nwp*mbr*.npy"
         sample_paths = glob.glob(os.path.join(self.sample_dir_path, member_file_regexp))
-        self.sample_names = [path.split("/")[-1][4:-4] for path in sample_paths]
+        self.sample_names = [os.path.splitext(os.path.basename(path))[0][4:] for path in sample_paths]
         # Now on form "yyymmddhh_mbrXXX"
 
         if subset:

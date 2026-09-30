@@ -73,3 +73,5 @@ tags
 # Coc configuration directory
 .vim
 
+.venv
+.venv-paper

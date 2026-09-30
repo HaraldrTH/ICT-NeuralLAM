@@ -14,11 +14,9 @@ from neural_lam.models.hi_lam_parallel import HiLAMParallel
 from neural_lam.weather_dataset import WeatherDataset
 from neural_lam import constants, utils
 
-MODELS = {
-    "graph_lam": GraphLAM,
-    "hi_lam": HiLAM,
-    "hi_lam_parallel": HiLAMParallel,
-}
+MODELS = {"graph_lam": GraphLAM,
+          "hi_lam": HiLAM,
+          "hi_lam_parallel": HiLAMParallel}
 
 def main():
     parser = ArgumentParser(description='Train or evaluate NeurWP models for LAM')
@@ -90,17 +88,39 @@ def main():
     seed.seed_everything(args.seed)
 
     # Load data
-    train_loader = torch.utils.data.DataLoader(
-            WeatherDataset(args.dataset, pred_length=args.ar_steps, split="train",
-                subsample_step=args.step_length, subset=bool(args.subset_ds),
-                control_only=args.control_only),
-            args.batch_size, shuffle=True, num_workers=args.n_workers)
-    max_pred_length = (65 // args.step_length) - 2 # 19
-    val_loader = torch.utils.data.DataLoader(
-            WeatherDataset(args.dataset, pred_length=max_pred_length, split="val",
-                subsample_step=args.step_length, subset=bool(args.subset_ds),
-                control_only=args.control_only),
-            args.batch_size, shuffle=False, num_workers=args.n_workers)
+    max_pred_length = (65 // args.step_length) - 2  # 19
+
+    train_loader = None
+    val_loader = None
+
+    if not args.eval:
+        train_loader = torch.utils.data.DataLoader(
+            WeatherDataset(
+                args.dataset,
+                pred_length=args.ar_steps,
+                split="train",
+                subsample_step=args.step_length,
+                subset=bool(args.subset_ds),
+                control_only=args.control_only,
+            ),
+            args.batch_size,
+            shuffle=True,
+            num_workers=args.n_workers,
+        )
+
+        val_loader = torch.utils.data.DataLoader(
+            WeatherDataset(
+                args.dataset,
+                pred_length=max_pred_length,
+                split="val",
+                subsample_step=args.step_length,
+                subset=bool(args.subset_ds),
+                control_only=args.control_only,
+            ),
+            args.batch_size,
+            shuffle=False,
+            num_workers=args.n_workers,
+        )
 
     # Instatiate model + trainer
     if torch.cuda.is_available():
@@ -130,10 +150,16 @@ def main():
             monitor="val_mean_loss", mode="min", save_last=True)
     logger = pl.loggers.WandbLogger(project=constants.wandb_project, name=run_name,
             config=args)
-    trainer = pl.Trainer(max_epochs=args.epochs, deterministic=True, strategy="ddp",
-            accelerator=device_name, logger=logger, log_every_n_steps=1,
-            callbacks=[checkpoint_callback], check_val_every_n_epoch=args.val_interval,
-            precision=args.precision)
+    trainer = pl.Trainer(max_epochs=args.epochs,
+                         deterministic=True,
+                         accelerator=device_name,
+                         devices=1,
+                         strategy="auto",
+                         logger=logger,
+                         log_every_n_steps=1,
+                         callbacks=[checkpoint_callback],
+                         check_val_every_n_epoch=args.val_interval,
+                         precision=args.precision)
 
     # Only init once, on rank 0 only
     if trainer.global_rank == 0:
