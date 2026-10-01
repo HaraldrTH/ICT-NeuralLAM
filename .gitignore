@@ -75,3 +75,6 @@ tags
 
 .venv
 .venv-paper
+
+# Our files
+chats/

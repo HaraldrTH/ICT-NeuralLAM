@@ -27,6 +27,69 @@ We plan to continue updating this repository as we improve existing models and d
 Collaborations around this implementation are very welcome.
 If you are working with Neural-LAM feel free to get in touch and/or submit pull requests to the repository.
 
+# ERA5 Nordic version
+This branch adapts Neural-LAM from the MEPS forecast data to 6-hourly ERA5 reanalysis data on a 0.25° lat-lon grid over the Nordic region (54.5–80.75°N, 3–31.5°E).
+The MEPS data and the `meps_example` dataset do not work with this branch, and the MEPS-specific numbers in the rest of this README (grid size, variables, 3 h time steps) do not apply.
+
+## What has changed
+* **New conversion script.** `create_era5_dataset.py` converts ERA5 GRIB files to the sample and static files described in the [repository format section](#format-of-data-directory).
+* **Variables.** The state consists of 25 variables: mean sea level pressure, 2 m temperature, 2 m dewpoint, 10 m wind (u, v) and geopotential, temperature, wind (u, v) and specific humidity at 500, 700, 850 and 925 hPa. Precipitation, sea surface temperature and the wave variables in the GRIB files are not used.
+* **Grid.** 106 × 115 grid nodes, with longitude and latitude in degrees used as grid coordinates. Plots use a lat-lon (plate carrée) map. The outermost 10 grid cells are the boundary area, where the true state is used as forcing (`--border_width`).
+* **Time steps.** One time step is 6 h. Each sample file holds 21 consecutive time steps (5 days), so a full forecast is 2 initial states followed by 19 predicted steps (114 h). `--step_length` is given in hours, defaults to 6 and has to be a multiple of 6.
+* **Samples and splits.** Samples are windows cut from the continuous reanalysis, starting every 60 h (`--stride`), alternating between 00 and 12 UTC. Data before 2025 is used for training, 2025 for validation and 2026 for testing (`--val_start`, `--test_start`).
+* **Forcing and static features.** The solar flux forcing is computed from solar geometry. The open water feature is taken from the ERA5 land-sea mask and is the same for all samples (sea ice is not accounted for). The surface geopotential is not part of the GRIB files and is downloaded from [WeatherBench 2](https://weatherbench2.readthedocs.io/) the first time the conversion script is run.
+* **Constants.** Variables, grid, projection and time structure are defined in `neural_lam/constants.py` and read from there by the dataset loader, the training script and `create_parameter_weights.py`. The MEPS-specific handling in the dataset loader (removing one feature and accumulating radiation) has been removed.
+* **Loss weights.** `create_parameter_weights.py` has weights for the new vertical levels (10 m: 0.1, 925 hPa: 0.07, 700 hPa: 0.04).
+* **Python environment.** The code has been run with PyTorch 2.8.0 (CUDA 12.8) and PyTorch Geometric 2.6.1 instead of the versions in the [installation instructions](#installation), as newer GPUs are not supported by PyTorch 2.0.1. Checkpoints are therefore loaded with `weights_only=False`. The packages `eccodes` and `numcodecs` have been added to `requirements.txt`.
+
+## Preparing the data
+Place the ERA5 GRIB files as
+```
+data
+└── ERA5_nordic
+    ├── single_level
+    │   └── data.grib       - Single level variables, all years
+    └── pressure
+        ├── 2022
+        │   └── data.grib   - Pressure level variables for one year
+        ├── ...
+        └── 2026
+            └── data.grib
+```
+Then run the pre-processing, here with the graph for the L1-LAM model:
+```
+python create_era5_dataset.py --dataset ERA5_nordic
+python create_mesh.py --dataset ERA5_nordic --graph 1level --levels 1
+python create_grid_features.py --dataset ERA5_nordic
+python create_parameter_weights.py --dataset ERA5_nordic
+```
+The conversion loads all data into memory (around 10 GB) and writes around 17 GB of samples to `data/ERA5_nordic/samples`.
+To re-run the conversion with existing samples in place, add `--overwrite 1`.
+Note that `--dataset ERA5_nordic` has to be given to all scripts, as the default is still `meps_example`.
+
+## Training
+To train the L1-LAM model, run
+```
+python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level
+```
+Useful options are `--epochs`, `--batch_size`, `--ar_steps` (number of 6 h steps to unroll in the loss, 1-19) and `--subset_ds 1` (use only 50 samples, to check that everything runs).
+The model is validated on the validation set after each epoch, by unrolling 19 steps.
+Checkpoints are saved in `saved_models/<run name>`, as `min_val_loss.ckpt` (lowest validation loss) and `last.ckpt`.
+See the [W&B section](#weights--biases-integration) for how to turn logging to W&B on or off.
+
+Other graphs and models are used as described in the sections [Create graph](#create-graph) and [Train Models](#train-models), with `--dataset ERA5_nordic` added.
+
+## Evaluation
+To evaluate a trained model on the test set, run
+```
+python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level \
+    --eval test --load saved_models/<run name>/min_val_loss.ckpt
+```
+Use `--eval val` to evaluate on the validation set instead.
+The model options (`--graph`, `--hidden_dim`, `--processor_layers` etc.) have to be the same as when the model was trained.
+Evaluation unrolls full 19-step forecasts and logs the loss at different lead times, MAE and RMSE per variable and lead time, maps of the spatial distribution of the loss and plots of example forecasts (`--n_example_pred`).
+These are saved in the W&B run directory (`wandb/<run>/files`), also when W&B is turned off.
+
 # Modularity
 The Neural-LAM code is designed to modularize the different components involved in training and evaluating neural weather prediction models.
 Models, graphs and data are stored separately and it should be possible to swap out individual components.
@@ -82,16 +145,8 @@ Note that this subset is far too little data to train any useful models, but all
 It should thus be useful to make sure that your python environment is set up correctly and that all the code can be ran without any issues.
 
 ### ERA5 data
-The code is currently set up for 6-hourly ERA5 reanalysis data on a regular lat-lon grid over the Nordic region (see `neural_lam/constants.py`).
-ERA5 GRIB files should be placed in the dataset directory as `data/ERA5_nordic/single_level/data.grib` and `data/ERA5_nordic/pressure/<year>/data.grib`.
-These are converted to the format described in the [repository format section](#format-of-data-directory) by running
-```
-python create_era5_dataset.py --dataset ERA5_nordic
-```
-Each sample is a window of 21 consecutive time steps (5 days).
-The solar flux forcing is computed from solar geometry, the open water feature is taken from the land-sea mask and the surface geopotential is downloaded from [WeatherBench 2](https://weatherbench2.readthedocs.io/).
-By default data before 2025 is used for training, 2025 for validation and 2026 for testing (see `python create_era5_dataset.py --help`).
-Note that the other scripts have to be given `--dataset ERA5_nordic`.
+This branch is set up for ERA5 data rather than MEPS data.
+See the [ERA5 section](#era5-nordic-version) for how to convert the ERA5 GRIB files and how the data is set up.
 
 ## Pre-processing
 An overview of how the different scripts and files depend on each other is given in this figure:
