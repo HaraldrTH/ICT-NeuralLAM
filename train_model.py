@@ -69,6 +69,9 @@ def main():
         help='learning rate (default: 0.001)')
     parser.add_argument('--val_interval', type=int, default=1,
         help='Number of epochs training between each validation run (default: 1)')
+    parser.add_argument('--patience', type=int, default=30,
+        help='Stop training when validation loss has not improved for this many '
+            'validation runs, 0 to always train for all epochs (default: 30)')
 
     # Evaluation options
     parser.add_argument('--eval', type=str,
@@ -153,6 +156,11 @@ def main():
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
             dirpath=f"saved_models/{run_name}", filename="min_val_loss",
             monitor="val_mean_loss", mode="min", save_last=True)
+    callbacks = [checkpoint_callback]
+    if args.patience > 0:
+        # Stop when validation loss no longer improves
+        callbacks.append(pl.callbacks.EarlyStopping(monitor="val_mean_loss",
+            mode="min", patience=args.patience))
     logger = pl.loggers.WandbLogger(project=constants.wandb_project, name=run_name,
             config=args)
     trainer = pl.Trainer(max_epochs=args.epochs,
@@ -162,7 +170,7 @@ def main():
                          strategy="auto",
                          logger=logger,
                          log_every_n_steps=1,
-                         callbacks=[checkpoint_callback],
+                         callbacks=callbacks,
                          check_val_every_n_epoch=args.val_interval,
                          precision=args.precision)
 

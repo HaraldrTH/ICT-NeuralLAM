@@ -74,8 +74,17 @@ python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level
 ```
 Useful options are `--epochs`, `--batch_size`, `--ar_steps` (number of 6 h steps to unroll in the loss, 1-19) and `--subset_ds 1` (use only 50 samples, to check that everything runs).
 The model is validated on the validation set after each epoch, by unrolling 19 steps.
+Training stops early when the validation loss has not improved for 30 validation runs (change with `--patience`, 0 turns early stopping off), or at the latest after `--epochs` epochs.
 Checkpoints are saved in `saved_models/<run name>`, as `min_val_loss.ckpt` (lowest validation loss) and `last.ckpt`.
 See the [W&B section](#weights--biases-integration) for how to turn logging to W&B on or off.
+
+To resume training from a checkpoint, run
+```
+python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level --load saved_models/<run name>/last.ckpt --restore_opt 1
+```
+Here `--restore_opt 1` also restores the optimizer state, and the model options (`--graph`, `--hidden_dim`, `--processor_layers` etc.) have to be the same as in the original run.
+Resuming starts a new run with its own directory in `saved_models`, and the epoch count and early stopping start over, so `--epochs` is the number of additional epochs.
+Use `min_val_loss.ckpt` instead of `last.ckpt` to continue from the best model, for example when fine-tuning with a larger `--ar_steps`.
 
 Other graphs and models are used as described in the sections [Create graph](#create-graph) and [Train Models](#train-models), with `--dataset ERA5_nordic` added.
 
