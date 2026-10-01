@@ -81,6 +81,18 @@ All graphs used in the paper are also available for download at the same link (b
 Note that this subset is far too little data to train any useful models, but all scripts can be ran with it.
 It should thus be useful to make sure that your python environment is set up correctly and that all the code can be ran without any issues.
 
+### ERA5 data
+The code is currently set up for 6-hourly ERA5 reanalysis data on a regular lat-lon grid over the Nordic region (see `neural_lam/constants.py`).
+ERA5 GRIB files should be placed in the dataset directory as `data/ERA5_nordic/single_level/data.grib` and `data/ERA5_nordic/pressure/<year>/data.grib`.
+These are converted to the format described in the [repository format section](#format-of-data-directory) by running
+```
+python create_era5_dataset.py --dataset ERA5_nordic
+```
+Each sample is a window of 21 consecutive time steps (5 days).
+The solar flux forcing is computed from solar geometry, the open water feature is taken from the land-sea mask and the surface geopotential is downloaded from [WeatherBench 2](https://weatherbench2.readthedocs.io/).
+By default data before 2025 is used for training, 2025 for validation and 2026 for testing (see `python create_era5_dataset.py --help`).
+Note that the other scripts have to be given `--dataset ERA5_nordic`.
+
 ## Pre-processing
 An overview of how the different scripts and files depend on each other is given in this figure:
 <p align="middle">

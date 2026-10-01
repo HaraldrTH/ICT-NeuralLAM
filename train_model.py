@@ -62,8 +62,9 @@ def main():
         help='Train only on control member of ensemble data (default: 0 (False))')
     parser.add_argument('--loss', type=str, default="mse",
         help='Loss function to use (default: mse)')
-    parser.add_argument('--step_length', type=int, default=3,
-        help='Step length in hours to consider single time step 1-3 (default: 3)')
+    parser.add_argument('--step_length', type=int, default=6,
+        help='Step length in hours to consider single time step, '
+            'multiple of 6 (default: 6)')
     parser.add_argument('--lr', type=float, default=1e-3,
         help='learning rate (default: 0.001)')
     parser.add_argument('--val_interval', type=int, default=1,
@@ -78,7 +79,8 @@ def main():
 
     # Asserts for arguments
     assert args.model in MODELS, f"Unknown model: {args.model}"
-    assert args.step_length <= 3, "Too high step length"
+    assert args.step_length % constants.raw_step_hours == 0, (
+            f"Step length has to be a multiple of {constants.raw_step_hours} h")
     assert args.eval in (None, "val", "test"), f"Unknown eval setting: {args.eval}"
 
     # Get an (actual) random run id as a unique identifier
@@ -88,7 +90,8 @@ def main():
     seed.seed_everything(args.seed)
 
     # Load data
-    max_pred_length = (65 // args.step_length) - 2  # 19
+    subsample_step = args.step_length // constants.raw_step_hours
+    max_pred_length = (constants.sample_length_raw // subsample_step) - 2  # 19
 
     train_loader = None
     val_loader = None
@@ -99,7 +102,7 @@ def main():
                 args.dataset,
                 pred_length=args.ar_steps,
                 split="train",
-                subsample_step=args.step_length,
+                subsample_step=subsample_step,
                 subset=bool(args.subset_ds),
                 control_only=args.control_only,
             ),
@@ -113,7 +116,7 @@ def main():
                 args.dataset,
                 pred_length=max_pred_length,
                 split="val",
-                subsample_step=args.step_length,
+                subsample_step=subsample_step,
                 subset=bool(args.subset_ds),
                 control_only=args.control_only,
             ),
@@ -132,11 +135,13 @@ def main():
     # Load model parameters Use new args for model
     model_class = MODELS[args.model]
     if args.load:
-        model = model_class.load_from_checkpoint(args.load, args=args)
+        model = model_class.load_from_checkpoint(args.load, args=args,
+                weights_only=False)
         if args.restore_opt:
             # Save for later
             # Unclear if this works for multi-GPU
-            model.opt_state = torch.load(args.load)["optimizer_states"][0]
+            model.opt_state = torch.load(args.load,
+                weights_only=False)["optimizer_states"][0]
     else:
         model = model_class(args)
 
@@ -171,7 +176,7 @@ def main():
         else: # Test
             eval_loader = torch.utils.data.DataLoader(WeatherDataset(args.dataset,
                 pred_length=max_pred_length, split="test",
-                subsample_step=args.step_length, subset=bool(args.subset_ds)),
+                subsample_step=subsample_step, subset=bool(args.subset_ds)),
             args.batch_size, shuffle=False, num_workers=args.n_workers)
 
         print(f"Running evaluation on {args.eval}")

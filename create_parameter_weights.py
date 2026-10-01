@@ -13,8 +13,8 @@ def main():
         help='Dataset to compute weights for (default: meps_example)')
     parser.add_argument('--batch_size', type=int, default=32,
         help='Batch size when iterating over the dataset')
-    parser.add_argument('--step_length', type=int, default=3,
-        help='Step length in hours to consider single time step (default: 3)')
+    parser.add_argument('--step_length', type=int, default=6,
+        help='Step length in hours to consider single time step (default: 6)')
     parser.add_argument('--n_workers', type=int, default=4,
         help='Number of workers in data loader (default: 4)')
     args = parser.parse_args()
@@ -24,14 +24,16 @@ def main():
     # Create parameter weights based on height
     # based on fig A.1 in graph cast paper
     w_par = np.zeros((len(constants.param_names),))
-    w_dict = {'2': 1.0, '0': 0.1, '65': 0.065, '1000': 0.1, '850': 0.05, '500': 0.03}
+    w_dict = {'2': 1.0, '0': 0.1, '10': 0.1, '925': 0.07, '850': 0.05, '700': 0.04,
+            '500': 0.03}
     w_list = np.array([w_dict[par.split('_')[-2]] for par in constants.param_names])
     print("Saving parameter weights...")
     np.save(os.path.join(static_dir_path, 'parameter_weights.npy'),
             w_list.astype('float32'))
 
     # Load dataset without any subsampling
-    ds = WeatherDataset(args.dataset, split="train", subsample_step=1, pred_length=63,
+    ds = WeatherDataset(args.dataset, split="train", subsample_step=1,
+            pred_length=constants.sample_length_raw-2,
             standardize=False) # Without standardization
     loader = torch.utils.data.DataLoader(ds, args.batch_size, shuffle=False,
             num_workers=args.n_workers)
@@ -68,20 +70,22 @@ def main():
     # Compute mean and std.-dev. of one-step differences across the dataset
     print("Computing mean and std.-dev. for one-step differences...")
     ds_standard = WeatherDataset(args.dataset, split="train", subsample_step=1,
-            pred_length=63, standardize=True) # Re-load with standardization
+            pred_length=constants.sample_length_raw-2,
+            standardize=True) # Re-load with standardization
     loader_standard = torch.utils.data.DataLoader(ds_standard, args.batch_size,
             shuffle=False, num_workers=args.n_workers)
-    used_subsample_len = (65//args.step_length)*args.step_length
+    step_length = args.step_length // constants.raw_step_hours # In raw time steps
+    used_subsample_len = (constants.sample_length_raw//step_length)*step_length
 
     diff_means = []
     diff_squares = []
     for init_batch, target_batch, _, _ in tqdm(loader_standard):
         batch = torch.cat((init_batch, target_batch),
                 dim=1) # (N_batch, N_t', N_grid, d_features)
-        # Note: batch contains only 1h-steps
-        stepped_batch = torch.cat([batch[:,ss_i:used_subsample_len:args.step_length]
-            for ss_i in range(args.step_length)], dim=0)
-        # (N_batch', N_t, N_grid, d_features), N_batch' = args.step_length*N_batch
+        # Note: batch contains all raw time steps
+        stepped_batch = torch.cat([batch[:,ss_i:used_subsample_len:step_length]
+            for ss_i in range(step_length)], dim=0)
+        # (N_batch', N_t, N_grid, d_features), N_batch' = step_length*N_batch
 
         batch_diffs = stepped_batch[:,1:] - stepped_batch[:,:-1]
         # (N_batch', N_t-1, N_grid, d_features)

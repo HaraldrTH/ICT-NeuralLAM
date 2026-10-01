@@ -21,7 +21,7 @@ class ARModel(pl.LightningModule):
         # Some constants useful for sub-classes
         self.batch_static_feature_dim = 1 # Only open water?
         self.grid_forcing_dim = 5*3 # 5 features for 3 time-step window
-        self.grid_state_dim = 17
+        self.grid_state_dim = len(constants.param_names)
 
         # Load static features for grid/data
         static_data_dict = utils.load_static_data(args.dataset)

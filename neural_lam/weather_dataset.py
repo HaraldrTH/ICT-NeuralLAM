@@ -9,15 +9,15 @@ from neural_lam import utils, constants
 class WeatherDataset(torch.utils.data.Dataset):
     """
     For our dataset:
-    N_t' = 65
-    N_t = 65//subsample_step (= 21 for 3h steps)
-    N_x = 268
-    N_y = 238
-    N_grid = 268x238 = 63784
-    d_features = 17 (d_features' = 18)
+    N_t' = 21
+    N_t = 21//subsample_step (= 21 for 6h steps)
+    N_x = 106
+    N_y = 115
+    N_grid = 106x115 = 12190
+    d_features = 25
     d_forcing = 5
     """
-    def __init__(self, dataset_name, pred_length=19, split="train", subsample_step=3,
+    def __init__(self, dataset_name, pred_length=19, split="train", subsample_step=1,
             standardize=True, subset=False, control_only=False):
         super().__init__()
 
@@ -34,7 +34,8 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         self.sample_length = pred_length + 2 # 2 init states
         self.subsample_step = subsample_step
-        self.original_sample_length = 65//self.subsample_step # 21 for 3h steps
+        self.original_sample_length = constants.sample_length_raw//\
+                self.subsample_step # 21 for 6h steps
         assert self.sample_length <= self.original_sample_length, (
                 "Requesting too long time series samples")
 
@@ -59,7 +60,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         sample_path = os.path.join(self.sample_dir_path, f"nwp_{sample_name}.npy")
         try:
             full_sample = torch.tensor(np.load(sample_path),
-                    dtype=torch.float32) # (N_t', N_x, N_y, d_features')
+                    dtype=torch.float32) # (N_t', N_x, N_y, d_features)
         except ValueError:
             print(f"Failed to load {sample_path}")
 
@@ -71,29 +72,7 @@ class WeatherDataset(torch.utils.data.Dataset):
             subsample_index = 0
         subsample_end_index = self.original_sample_length*self.subsample_step
         sample = full_sample[subsample_index:subsample_end_index:self.subsample_step]
-        # (N_t, N_x, N_y, d_features')
-
-        # Remove feature 15, "z_height_above_ground"
-        sample = torch.cat((sample[:,:,:,:15], sample[:,:,:,16:]),
-                dim=3) # (N_t, N_x, N_y, d_features)
-
-        # Accumulate solar radiation instead of just subsampling
-        rad_features = full_sample[:,:,:,2:4] # (N_t', N_x, N_y, 2)
-        # Accumulate for first time step
-        init_accum_rad = torch.sum(rad_features[:(subsample_index+1)],
-                dim=0, keepdim=True) # (1, N_x, N_y, 2)
-        # Accumulate for rest of subsampled sequence
-        in_subsample_len = subsample_end_index - self.subsample_step + subsample_index +1
-        rad_features_in_subsample = rad_features[(subsample_index+1):
-                in_subsample_len] # (N_t*, N_x, N_y, 2), N_t* = (N_t-1)*ss_step
-        _, N_x, N_y, _ = sample.shape
-        rest_accum_rad = torch.sum(rad_features_in_subsample.view(
-            self.original_sample_length-1, self.subsample_step, N_x, N_y, 2
-            ), dim=1) # (N_t-1, N_x, N_y, 2)
-        accum_rad = torch.cat((init_accum_rad, rest_accum_rad),
-                dim=0) # (N_t, N_x, N_y, 2)
-        # Replace in sample
-        sample[:,:,:,2:4] = accum_rad
+        # (N_t, N_x, N_y, d_features)
 
         # Flatten spatial dim
         sample = sample.flatten(1,2) # (N_t, N_grid, d_features)
@@ -138,14 +117,16 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         # Time of day and year
         dt_obj = dt.datetime.strptime(sample_datetime, '%Y%m%d%H')
-        dt_obj = dt_obj + dt.timedelta(hours=2+subsample_index) # Offset for first index
+        dt_obj = dt_obj + dt.timedelta(hours=constants.sample_offset_hours +
+                subsample_index*constants.raw_step_hours) # Offset for first index
         # Extract for initial step
         init_hour_in_day = dt_obj.hour
         start_of_year = dt.datetime(dt_obj.year,1,1)
         init_seconds_into_year = (dt_obj-start_of_year).total_seconds()
 
         # Add increments for all steps
-        hour_inc = torch.arange(self.sample_length)*self.subsample_step # (sample_len,)
+        hour_inc = torch.arange(self.sample_length)*self.subsample_step*\
+                constants.raw_step_hours # (sample_len,)
         hour_of_day = init_hour_in_day + hour_inc # (sample_len,), Can be > 24 but ok
         second_into_year = init_seconds_into_year + hour_inc*3600 # (sample_len,)
         #can roll over to next year, ok because periodicity
