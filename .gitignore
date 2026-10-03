@@ -4,6 +4,7 @@ slurm_log*
 sweeps
 test_*.sh
 data
+Test_Data
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
