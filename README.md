@@ -74,8 +74,9 @@ python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level
 ```
 Useful options are `--epochs`, `--batch_size`, `--ar_steps` (number of 6 h steps to unroll in the loss, 1-19) and `--subset_ds 1` (use only 50 samples, to check that everything runs).
 The model is validated on the validation set after each epoch, by unrolling 19 steps.
-Training stops early when the validation loss has not improved for 30 validation runs (change with `--patience`, 0 turns early stopping off), or at the latest after `--epochs` epochs.
-Checkpoints are saved in `saved_models/<run name>`, as `min_val_loss.ckpt` (lowest validation loss) and `last.ckpt`.
+Training stops early when the validation loss over the first `--ar_steps` steps (`val_ar_loss`, the same horizon as the training loss) has not improved for 30 validation runs (change with `--patience`, 0 turns early stopping off), or at the latest after `--epochs` epochs.
+The loss over the full 19-step rollout (`val_mean_loss`) is still logged, but is too noisy to stop on when training on short rollouts.
+Checkpoints are saved in `saved_models/<run name>`, as `min_val_loss.ckpt` (lowest `val_ar_loss`) and `last.ckpt`.
 See the [W&B section](#weights--biases-integration) for how to turn logging to W&B on or off.
 
 To resume training from a checkpoint, run
@@ -98,6 +99,64 @@ Use `--eval val` to evaluate on the validation set instead.
 The model options (`--graph`, `--hidden_dim`, `--processor_layers` etc.) have to be the same as when the model was trained.
 Evaluation unrolls full 19-step forecasts and logs the loss at different lead times, MAE and RMSE per variable and lead time, maps of the spatial distribution of the loss and plots of example forecasts (`--n_example_pred`).
 These are saved in the W&B run directory (`wandb/<run>/files`), also when W&B is turned off.
+The files `test_rmse.csv` and `test_mae.csv` have one row per lead time (6 h to 114 h) and one column per variable, in the order of `param_names` in `neural_lam/constants.py` and in the original units.
+An evaluation takes around one minute.
+
+## Recommended procedure
+Training on single steps only gives a model that is good at 6 h but drifts in longer forecasts.
+The procedure that has given good forecasts over the full 114 h is to first train on single steps and then fine-tune on 4-step rollouts.
+Run the commands from the repository root, in the same terminal, as each step picks up the newest directory in `saved_models`.
+
+1. **Train on single steps** until the validation loss levels out:
+    ```
+    python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level --epochs 600
+    ```
+    For the L1-LAM model `val_ar_loss` levelled out at around 0.83 after roughly 550 epochs (10 s per epoch on an RTX 5090).
+    If early stopping ends the run well above this, resume from `last.ckpt` with `--restore_opt 1` as described under [Training](#training).
+2. **Fine-tune on 4-step rollouts**, starting from the best single-step model and with a fresh optimizer (no `--restore_opt`):
+    ```
+    STEP1=$(ls -t saved_models | head -1)
+    python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level \
+        --load saved_models/$STEP1/min_val_loss.ckpt --ar_steps 4 --epochs 500
+    ```
+    This stopped by early stopping after 145 epochs (16 s per epoch), with `val_ar_loss` at 1.95.
+    Note that `val_ar_loss` is now the mean over 4 steps and can not be compared to the value from step 1.
+3. **Evaluate both models on the test set**, to check that the fine-tuning helped:
+    ```
+    STEP2=$(ls -t saved_models | head -1)
+    python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level \
+        --eval test --load saved_models/$STEP1/min_val_loss.ckpt
+    python train_model.py --dataset ERA5_nordic --model graph_lam --graph 1level \
+        --eval test --load saved_models/$STEP2/min_val_loss.ckpt
+    ```
+
+Do the fine-tuning from a single-step model that has finished training.
+Fine-tuning with `--ar_steps 4` from a model trained for only a few epochs gave a test loss of 12.6, worse than single-step training alone.
+
+### Reference results
+Test losses for the L1-LAM model (4 processor layers, hidden dimension 64) trained as above:
+
+| | 1. Single steps | 2. Fine-tuned on 4 steps |
+|---|---|---|
+| `test_loss_unroll1` (6 h) | 0.89 | 1.00 |
+| `test_loss_unroll5` (30 h) | 5.22 | 3.19 |
+| `test_loss_unroll10` (60 h) | 10.22 | 5.22 |
+| `test_loss_unroll19` (114 h) | 14.91 | 7.48 |
+| `test_mean_loss` | 9.16 | 4.82 |
+
+The fine-tuning costs a little at the first step and roughly halves the loss for the rest of the forecast.
+A new run can be compared to these numbers, and to the RMSE of the fine-tuned model for some of the variables:
+
+| | 6 h | 24 h | 72 h | 114 h |
+|---|---|---|---|---|
+| `msl` (Pa) | 99 | 274 | 523 | 613 |
+| `t_2` (K) | 0.99 | 1.45 | 2.21 | 2.50 |
+| `u_10` (m/s) | 1.41 | 2.29 | 2.84 | 3.02 |
+| `z_500` (m²/s²) | 116 | 331 | 634 | 788 |
+
+A useful check is to compare with a persistence forecast, which repeats the last initial state for all lead times.
+Averaged over the variables, the RMSE of the fine-tuned model is 0.64 of that of persistence at 6 h and 0.54-0.58 at all later lead times.
+The single-step model goes from 0.61 at 6 h to around 0.76 at 114 h, and is barely better than persistence for geopotential from 72 h (0.96 for `z_500`).
 
 # Modularity
 The Neural-LAM code is designed to modularize the different components involved in training and evaluating neural weather prediction models.

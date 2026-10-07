@@ -50,6 +50,7 @@ class ARModel(pl.LightningModule):
                 ).item() # Number of grid nodes to predict
 
         self.step_length = args.step_length # Number of hours per pred. step
+        self.ar_steps = args.ar_steps # Number of steps unrolled in training loss
         self.val_maes = []
         self.test_maes = []
         self.test_mses = []
@@ -218,6 +219,9 @@ class ARModel(pl.LightningModule):
         val_log_dict = {f"val_loss_unroll{step}": time_step_loss[step-1]
                 for step in constants.val_step_log_errors}
         val_log_dict["val_mean_loss"] = mean_loss
+        # Loss over the steps unrolled during training, used for early stopping
+        # and checkpointing (the full rollout loss is too noisy for this)
+        val_log_dict["val_ar_loss"] = torch.mean(time_step_loss[:self.ar_steps])
 
         maes = self.per_var_error(prediction, target) # (B, pred_steps, d_f)
         self.val_maes.append(maes)

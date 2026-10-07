@@ -4,6 +4,9 @@ import pytorch_lightning as pl
 from lightning_fabric.utilities import seed
 from argparse import ArgumentParser
 import time
+import matplotlib
+# Figures are only logged to W&B. A GUI backend (Tk) crashes data loader workers
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import wandb
 
@@ -70,7 +73,8 @@ def main():
     parser.add_argument('--val_interval', type=int, default=1,
         help='Number of epochs training between each validation run (default: 1)')
     parser.add_argument('--patience', type=int, default=30,
-        help='Stop training when validation loss has not improved for this many '
+        help='Stop training when validation loss over the first ar_steps steps '
+            'has not improved for this many '
             'validation runs, 0 to always train for all epochs (default: 30)')
 
     # Evaluation options
@@ -155,11 +159,11 @@ def main():
             f"{time.strftime('%m_%d_%H')}-{random_run_id:04d}"
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
             dirpath=f"saved_models/{run_name}", filename="min_val_loss",
-            monitor="val_mean_loss", mode="min", save_last=True)
+            monitor="val_ar_loss", mode="min", save_last=True)
     callbacks = [checkpoint_callback]
     if args.patience > 0:
         # Stop when validation loss no longer improves
-        callbacks.append(pl.callbacks.EarlyStopping(monitor="val_mean_loss",
+        callbacks.append(pl.callbacks.EarlyStopping(monitor="val_ar_loss",
             mode="min", patience=args.patience))
     logger = pl.loggers.WandbLogger(project=constants.wandb_project, name=run_name,
             config=args)
