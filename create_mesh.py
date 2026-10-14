@@ -119,8 +119,8 @@ def prepend_node_index(graph, new_index):
 
 def main():
     parser = ArgumentParser(description='Graph genreation arguments')
-    parser.add_argument('--dataset', type=str, default="meps_example",
-        help='Dataset to load grid point coordinates from (default: meps_example)')
+    parser.add_argument('--dataset', type=str, default="era5",
+        help='Dataset to load grid point coordinates from (default: era5)')
     parser.add_argument('--graph', type=str, default="multiscale",
         help='Name to save graph as (default: multiscale)')
     parser.add_argument('--plot', type=int, default=0,

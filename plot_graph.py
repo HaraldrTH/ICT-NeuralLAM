@@ -12,8 +12,8 @@ GRID_HEIGHT = 0
 
 def main():
     parser = ArgumentParser(description='Plot graph')
-    parser.add_argument('--dataset', type=str, default="meps_example",
-        help='Datast to load grid coordinates from (default: meps_example)')
+    parser.add_argument('--dataset', type=str, default="era5",
+        help='Datast to load grid coordinates from (default: era5)')
     parser.add_argument('--graph', type=str, default="multiscale",
         help='Graph to plot (default: multiscale)')
     parser.add_argument('--save', type=str,

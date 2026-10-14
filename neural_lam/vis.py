@@ -7,7 +7,7 @@ from tueplots import axes, bundles
 from neural_lam import utils, constants
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
-def plot_error_map(errors, title=None, step_length=3):
+def plot_error_map(errors, title=None, step_length=6):
     """
     Plot a heatmap of errors of different variables at different predictions horizons
     errors: (pred_steps, d_f)
@@ -66,7 +66,7 @@ def plot_prediction(pred, target, obs_mask, title=None, vrange=None):
     pixel_alpha = mask_reshaped.clamp(0.7, 1).cpu().numpy() # Faded border region
 
     fig, axes = plt.subplots(1, 2, figsize=(13,7),
-            subplot_kw={"projection": constants.lambert_proj})
+            subplot_kw={"projection": constants.data_proj})
 
     # Plot pred and target
     for ax, data in zip(axes, (target, pred)):
@@ -104,7 +104,7 @@ def plot_spatial_error(error, obs_mask, title=None, vrange=None):
     pixel_alpha = mask_reshaped.clamp(0.7, 1).cpu().numpy() # Faded border region
 
     fig, ax = plt.subplots(figsize=(5,4.8),
-            subplot_kw={"projection": constants.lambert_proj})
+            subplot_kw={"projection": constants.data_proj})
 
     ax.coastlines() # Add coastline outlines
     error_grid = error.reshape(*constants.grid_shape).cpu().numpy()

@@ -73,3 +73,8 @@ tags
 
 .venv
 .venv-paper
+
+# Our files
+.vscode/
+chats/
+graphs/

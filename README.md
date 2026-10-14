@@ -81,6 +81,21 @@ All graphs used in the paper are also available for download at the same link (b
 Note that this subset is far too little data to train any useful models, but all scripts can be ran with it.
 It should thus be useful to make sure that your python environment is set up correctly and that all the code can be ran without any issues.
 
+### ERA5 data (this branch)
+On this branch the code reads ERA5 data (6-hourly, 0.25°, Nordic area) from a zarr store instead of the MEPS `.npy` samples described below.
+Put the GRIB files downloaded from the CDS in `data/era5grib/single_level/data.grib` and `data/era5grib/pressure/<year>/data.grib` and run
+```
+python prepare_era5.py
+python create_parameter_weights.py
+python create_grid_features.py
+python create_mesh.py --graph era5_multiscale
+```
+This creates `data/era5/era5.zarr` (all state variables, time x lat x lon x variable) and the files in `data/era5/static/`.
+Variables used, their loss weights and the train/val/test date ranges are set in `neural_lam/constants.py`; re-run `create_parameter_weights.py` after changing them.
+Surface geopotential is not part of the download; to include it as a grid feature, pass a GRIB file with ERA5 surface geopotential to `prepare_era5.py --orography <file>`.
+Top-of-atmosphere solar radiation is computed from time and position, not read from data.
+`--step_length` is given in hours and must be a multiple of 6.
+
 ## Pre-processing
 An overview of how the different scripts and files depend on each other is given in this figure:
 <p align="middle">

@@ -2,7 +2,7 @@ import random
 import torch
 import pytorch_lightning as pl
 from lightning_fabric.utilities import seed
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 import time
 import matplotlib.pyplot as plt
 import wandb
@@ -14,6 +14,9 @@ from neural_lam.models.hi_lam_parallel import HiLAMParallel
 from neural_lam.weather_dataset import WeatherDataset
 from neural_lam import constants, utils
 
+# Checkpoints store the training arguments, allow loading these with weights_only
+torch.serialization.add_safe_globals([Namespace])
+
 MODELS = {"graph_lam": GraphLAM,
           "hi_lam": HiLAM,
           "hi_lam_parallel": HiLAMParallel}
@@ -22,8 +25,8 @@ def main():
     parser = ArgumentParser(description='Train or evaluate NeurWP models for LAM')
 
     # General options
-    parser.add_argument('--dataset', type=str, default="meps_example",
-        help='Dataset, corresponding to name in data directory (default: meps_example)')
+    parser.add_argument('--dataset', type=str, default="era5",
+        help='Dataset, corresponding to name in data directory (default: era5)')
     parser.add_argument('--model', type=str, default="graph_lam",
         help='Model architecture to train/evaluate (default: graph_lam)')
     parser.add_argument('--subset_ds', type=int, default=0,
@@ -44,8 +47,8 @@ def main():
         help='Numerical precision to use for model (32/16/bf16) (default: 32)')
 
     # Model architecture
-    parser.add_argument('--graph', type=str, default="multiscale",
-        help='Graph to load and use in graph-based model (default: multiscale)')
+    parser.add_argument('--graph', type=str, default="era5_multiscale",
+        help='Graph to load and use in graph-based model (default: era5_multiscale)')
     parser.add_argument('--hidden_dim', type=int, default=64,
         help='Dimensionality of all hidden representations (default: 64)')
     parser.add_argument('--hidden_layers', type=int, default=1,
@@ -57,13 +60,14 @@ def main():
 
     # Training options
     parser.add_argument('--ar_steps', type=int, default=1,
-        help='Number of steps to unroll prediction for in loss (1-19) (default: 1)')
+        help='Number of steps to unroll prediction for in loss (default: 1)')
     parser.add_argument('--control_only', type=int, default=0,
         help='Train only on control member of ensemble data (default: 0 (False))')
     parser.add_argument('--loss', type=str, default="mse",
         help='Loss function to use (default: mse)')
-    parser.add_argument('--step_length', type=int, default=3,
-        help='Step length in hours to consider single time step 1-3 (default: 3)')
+    parser.add_argument('--step_length', type=int, default=6,
+        help='Step length in hours to consider single time step, multiple of 6 '
+        '(default: 6)')
     parser.add_argument('--lr', type=float, default=1e-3,
         help='learning rate (default: 0.001)')
     parser.add_argument('--val_interval', type=int, default=1,
@@ -72,13 +76,18 @@ def main():
     # Evaluation options
     parser.add_argument('--eval', type=str,
         help='Eval model on given data split (val/test) (default: None (train model))')
+    parser.add_argument('--eval_steps', type=int, default=19,
+        help='Number of steps to unroll prediction for in val/test (default: 19)')
     parser.add_argument('--n_example_pred', type=int, default=1,
         help='Number of example predictions to plot during evaluation (default: 1)')
     args = parser.parse_args()
 
     # Asserts for arguments
     assert args.model in MODELS, f"Unknown model: {args.model}"
-    assert args.step_length <= 3, "Too high step length"
+    assert args.step_length % constants.data_step_hours == 0, \
+            f"Step length must be a multiple of {constants.data_step_hours} h"
+    assert args.eval_steps >= max(constants.val_step_log_errors), \
+            f"eval_steps must be at least {max(constants.val_step_log_errors)}"
     assert args.eval in (None, "val", "test"), f"Unknown eval setting: {args.eval}"
 
     # Get an (actual) random run id as a unique identifier
@@ -88,7 +97,8 @@ def main():
     seed.seed_everything(args.seed)
 
     # Load data
-    max_pred_length = (65 // args.step_length) - 2  # 19
+    max_pred_length = args.eval_steps
+    subsample_step = args.step_length // constants.data_step_hours # In data steps
 
     train_loader = None
     val_loader = None
@@ -99,7 +109,7 @@ def main():
                 args.dataset,
                 pred_length=args.ar_steps,
                 split="train",
-                subsample_step=args.step_length,
+                subsample_step=subsample_step,
                 subset=bool(args.subset_ds),
                 control_only=args.control_only,
             ),
@@ -113,7 +123,7 @@ def main():
                 args.dataset,
                 pred_length=max_pred_length,
                 split="val",
-                subsample_step=args.step_length,
+                subsample_step=subsample_step,
                 subset=bool(args.subset_ds),
                 control_only=args.control_only,
             ),
@@ -171,7 +181,7 @@ def main():
         else: # Test
             eval_loader = torch.utils.data.DataLoader(WeatherDataset(args.dataset,
                 pred_length=max_pred_length, split="test",
-                subsample_step=args.step_length, subset=bool(args.subset_ds)),
+                subsample_step=subsample_step, subset=bool(args.subset_ds)),
             args.batch_size, shuffle=False, num_workers=args.n_workers)
 
         print(f"Running evaluation on {args.eval}")
