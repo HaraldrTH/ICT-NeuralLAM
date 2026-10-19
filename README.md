@@ -83,16 +83,59 @@ It should thus be useful to make sure that your python environment is set up cor
 
 ### ERA5 data (this branch)
 On this branch the code reads ERA5 data (6-hourly, 0.25°, Nordic area) from a zarr store instead of the MEPS `.npy` samples described below.
-Put the GRIB files downloaded from the CDS in `data/era5grib/single_level/data.grib` and `data/era5grib/pressure/<year>/data.grib` and run
+
+#### Steps to download and prepare ERA5 data
+
+**1. Download from CDS**
+
+Requires a [CDS API key](https://cds.climate.copernicus.eu/how-to-api) configured in `~/.cdsapirc`.
+Downloads single-level and pressure-level GRIB files as zip archives into `data/ERA5_nordic/raw/`.
+Years from 2022 up to the current year are downloaded automatically; ERA5 has a ~5-day lag so the most recent days may be absent.
+
+```
+python downloadERA5nordic.py
+```
+
+**2. Extract zip archives**
+
+Extracts the downloaded zips into the directory structure expected by `prepare_era5.py`.
+
+```
+python unzipERA5.py
+```
+
+Expected structure after extraction:
+```
+data/
+├── ERA5_nordic/
+│   └── raw/
+│       ├── ERA5.zip
+│       ├── ERA5_pressure_2022.zip
+│       ├── ERA5_pressure_2023.zip
+│       └── ...
+└── era5grib/
+    ├── single_level/
+    │   └── data.grib
+    └── pressure/
+        ├── 2022/
+        │   └── data.grib
+        ├── 2023/
+        │   └── data.grib
+        └── ...
+```
+
+**3. Convert to zarr and create static files**
+
 ```
 python prepare_era5.py
 python create_parameter_weights.py
 python create_grid_features.py
 python create_mesh.py --graph era5_multiscale
 ```
+
 This creates `data/era5/era5.zarr` (all state variables, time x lat x lon x variable) and the files in `data/era5/static/`.
 Variables used, their loss weights and the train/val/test date ranges are set in `neural_lam/constants.py`; re-run `create_parameter_weights.py` after changing them.
-Surface geopotential is not part of the download; to include it as a grid feature, pass a GRIB file with ERA5 surface geopotential to `prepare_era5.py --orography <file>`.
+Surface geopotential is not part of the CDS download; to include it as a grid feature, pass a GRIB file with ERA5 surface geopotential to `prepare_era5.py --orography <file>`.
 Top-of-atmosphere solar radiation is computed from time and position, not read from data.
 `--step_length` is given in hours and must be a multiple of 6.
 
