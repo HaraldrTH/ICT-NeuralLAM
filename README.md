@@ -97,10 +97,26 @@ python train_model.py --subset_ds 1 --epochs 1
 
 Train the models:
 ```
-python train_model.py --model graph_lam --graph era5_multiscale --patience 10
-python train_model.py --model hi_lam --graph era5_hierarchical --patience 10
-python train_model.py --model hi_lam_parallel --graph era5_hierarchical --patience 10
+python train_model.py --model graph_lam --graph era5_multiscale --epochs 100 --patience 10
+python train_model.py --model hi_lam --graph era5_hierarchical --epochs 100 --patience 10
+python train_model.py --model hi_lam_parallel --graph era5_hierarchical --epochs 100 --patience 10
 ```
+
+**Suggested number of epochs.**
+One epoch is roughly 990 optimizer steps (about 3950 training samples at batch size 4).
+Training uses AdamW without a learning rate schedule, so rely on early stopping rather than a fixed epoch count, and use the same settings for all three models so they are compared fairly:
+
+1. Single-step training: `--epochs 100 --patience 10`. Training usually stops before the cap once `val_mean_loss` levels off.
+2. Fine-tuning with a longer unroll, starting from the best single-step checkpoint:
+```
+python train_model.py --model graph_lam --graph era5_multiscale --ar_steps 4 \
+    --epochs 30 --patience 5 --load saved_models/<run_name>/min_val_loss.ckpt
+```
+Each step costs about 4 times as much with `--ar_steps 4`, so fewer epochs are needed.
+Use the matching `--model` and `--graph` for Hi-LAM models.
+
+If `val_mean_loss` is still decreasing when the epoch cap is reached, continue with `--resume` and a larger `--epochs`.
+`--patience` counts validation runs, so with `--val_interval 2` a patience of 10 means 20 epochs.
 
 Useful options (run `python train_model.py --help` for all):
 
