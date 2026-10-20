@@ -9,10 +9,12 @@ val_step_log_errors = np.array([1, 2, 3, 5, 10, 15, 19])
 # Data
 zarr_name = "era5.zarr" # Name of zarr store in data/<dataset>/
 data_step_hours = 6 # Hours between time steps in data
+# Val and test are each a full year, so all seasons are covered, ending at the
+# last time in the data (2026-09-18T12). Update if more data is downloaded.
 split_times = { # (first, last) time of each split, inclusive
-    "train": ("2022-01-01T00", "2024-12-31T18"),
-    "val": ("2025-01-01T00", "2025-12-31T18"),
-    "test": ("2026-01-01T00", "2026-12-31T18"),
+    "train": ("2022-01-01T00", "2024-09-17T18"),
+    "val": ("2024-09-18T00", "2025-09-17T18"),
+    "test": ("2025-09-18T00", "2026-09-18T12"),
 }
 eval_init_hours = (0, 12) # Hours of day to start forecasts from in val/test
 

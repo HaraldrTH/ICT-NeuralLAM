@@ -78,3 +78,5 @@ tags
 .vscode/
 chats/
 graphs/
+saved_models/
+wandb/

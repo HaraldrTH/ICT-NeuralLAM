@@ -27,64 +27,10 @@ We plan to continue updating this repository as we improve existing models and d
 Collaborations around this implementation are very welcome.
 If you are working with Neural-LAM feel free to get in touch and/or submit pull requests to the repository.
 
-# Modularity
-The Neural-LAM code is designed to modularize the different components involved in training and evaluating neural weather prediction models.
-Models, graphs and data are stored separately and it should be possible to swap out individual components.
-Still, some restrictions are inevitable:
-
-* The graph used has to be compatible with what the model expects. E.g. a hierarchical model requires a hierarchical graph.
-* The graph and data are specific to the limited area under consideration. This is of course true for the data, but also the graph should be created with the exact geometry of the area in mind.
-
-<p align="middle">
-  <img src="figures/neural_lam_setup.png" width="600"/>
-</p>
-
-
-## A note on the limited area setting
-Currently we are using these models on a limited area covering the Nordic region, the so called MEPS area (see [paper](https://arxiv.org/abs/2309.17370)).
-There are still some parts of the code that is quite specific for the MEPS area use case.
-This is in particular true for the mesh graph creation (`create_mesh.py`) and some of the constants used (`neural_lam/constants.py`).
-If there is interest to use Neural-LAM for other areas it is not a substantial undertaking to refactor the code to be fully area-agnostic.
-We would be happy to support such enhancements.
-See the issues https://github.com/joeloskarsson/neural-lam/issues/2, https://github.com/joeloskarsson/neural-lam/issues/3 and https://github.com/joeloskarsson/neural-lam/issues/4 for some initial ideas on how this could be done.
-
-# Using Neural-LAM
-Below follows instructions on how to use Neural-LAM to train and evaluate models.
-
-## Installation
-Follow the steps below to create the neccesary python environment.
-
-1. Install GEOS for your system. For example with `sudo apt-get install libgeos-dev`. This is neccesary for the Cartopy requirement.
-2. Use python 3.9.
-3. Install version 2.0.1 of PyTorch. Follow instructions on the [PyTorch webpage](https://pytorch.org/get-started/previous-versions/) for how to set this up with GPU support on your system.
-4. Install required packages specified in `requirements.txt`.
-5. Install PyTorch Geometric version 2.2.0. This can be done by running
-```
-TORCH="2.0.1"
-CUDA="cu117"
-
-pip install pyg-lib==0.2.0 torch-scatter==2.1.1 torch-sparse==0.6.17 torch-cluster==1.6.1\
-    torch-geometric==2.3.1 -f https://pytorch-geometric.com/whl/torch-${TORCH}+${CUDA}.html
-```
-You will have to adjust the `CUDA` variable to match the CUDA version on your system or to run on CPU. See the [installation webpage](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html) for more information.
-
-## Data
-Datasets should be stored in a directory called `data`.
-See the [repository format section](#format-of-data-directory) for details on the directory structure.
-
-
-The full MEPS dataset is available for download [here](https://nextcloud.liu.se/s/meps). See instructions in the file `README.txt` for how to download and extract the full dataset.
-
-A tiny subset of the MEPS data (named `meps_example`) is also available in `example_data.zip`, which can be downloaded from [here](https://liuonline-my.sharepoint.com/:u:/g/personal/joeos82_liu_se/EaUUq6h9og1EsLwJmKAltWwB7zP2gmObe-K8pL6qGYYiGg?e=yQbFuV).
-Download the files and unzip in the neural-lam directory.
-All graphs used in the paper are also available for download at the same link (but can as easily be re-generated using `create_mesh.py`).
-Note that this subset is far too little data to train any useful models, but all scripts can be ran with it.
-It should thus be useful to make sure that your python environment is set up correctly and that all the code can be ran without any issues.
-
-### ERA5 data (this branch)
+# ERA5 data (this branch)
 On this branch the code reads ERA5 data (6-hourly, 0.25°, Nordic area) from a zarr store instead of the MEPS `.npy` samples described below.
 
-#### Steps to download and prepare ERA5 data
+## Steps to download and prepare ERA5 data
 
 **1. Download from CDS**
 
@@ -131,6 +77,7 @@ python prepare_era5.py
 python create_parameter_weights.py
 python create_grid_features.py
 python create_mesh.py --graph era5_multiscale
+python create_mesh.py --graph era5_hierarchical --hierarchical 1  # only needed for Hi-LAM models
 ```
 
 This creates `data/era5/era5.zarr` (all state variables, time x lat x lon x variable) and the files in `data/era5/static/`.
@@ -138,6 +85,142 @@ Variables used, their loss weights and the train/val/test date ranges are set in
 Surface geopotential is not part of the CDS download; to include it as a grid feature, pass a GRIB file with ERA5 surface geopotential to `prepare_era5.py --orography <file>`.
 Top-of-atmosphere solar radiation is computed from time and position, not read from data.
 `--step_length` is given in hours and must be a multiple of 6.
+
+## Training on ERA5
+Training uses `train_model.py`; `--dataset era5` and `--graph era5_multiscale` are the defaults.
+Results are logged to Weights & Biases, so run `wandb login` first, or set `WANDB_MODE=offline` to only log locally (see [Weights & Biases Integration](#weights--biases-integration)).
+
+Check that everything runs on a small subset first (50 samples per split):
+```
+python train_model.py --subset_ds 1 --epochs 1
+```
+
+Train the models:
+```
+python train_model.py --model graph_lam --graph era5_multiscale --patience 10
+python train_model.py --model hi_lam --graph era5_hierarchical --patience 10
+python train_model.py --model hi_lam_parallel --graph era5_hierarchical --patience 10
+```
+
+Useful options (run `python train_model.py --help` for all):
+
+* `--epochs`: Maximum number of epochs (default 200).
+* `--patience`: Stop early when `val_mean_loss` has not improved for this many validation runs. Off by default, in which case training always runs for `--epochs`.
+* `--ar_steps`: Number of 6 h steps unrolled in the training loss (default 1). Training first with 1 step and then continuing from that checkpoint with `--load <ckpt> --ar_steps 4` (or similar) usually gives more stable long forecasts.
+* `--batch_size`, `--hidden_dim`, `--processor_layers`, `--lr`: Usual model and optimization settings.
+
+Each run gets a directory `saved_models/<run_name>/` containing
+* `min_val_loss.ckpt`: Model with the lowest `val_mean_loss`. Use this one for testing.
+* `last.ckpt`: Model after the latest epoch. Use this one to resume.
+
+**Resuming an interrupted run.**
+`--resume` restores weights, optimizer, epoch counter and early stopping state, and keeps writing checkpoints to the same directory:
+```
+python train_model.py --model graph_lam --graph era5_multiscale --patience 10 \
+    --resume saved_models/<run_name>/last.ckpt
+```
+Pass the same model options as in the original run. The resumed run is logged as a new W&B run named `resume-<run_name>`.
+`--load` is different: it only loads the weights (and with `--restore_opt 1` the optimizer) and starts a new run from epoch 0, which is what you want for fine-tuning with other settings such as a larger `--ar_steps`.
+
+## Testing on ERA5
+Evaluate the best checkpoint on the test split (2025-09-18 to 2026-09-18), with the same model options as in training:
+```
+python train_model.py --model graph_lam --graph era5_multiscale --eval test \
+    --load saved_models/<run_name>/min_val_loss.ckpt --n_example_pred 3
+```
+Use `--eval val` instead to evaluate on the validation split.
+Each forecast is started at 00 or 12 UTC from two initial states and unrolled for `--eval_steps` steps (default 19, i.e. 114 h).
+`--n_example_pred` sets how many example forecasts are plotted.
+
+## Interpreting results
+**Where results are stored.**
+Scalars and plots are logged to W&B.
+Files are also saved in the local run directory `wandb/<run>/files/` (`wandb/offline-run-*/files/` in offline mode).
+
+**Loss values (`train_loss`, `val_mean_loss`, `test_loss_unrollN`, `test_mean_loss`).**
+These are weighted sums over all variables of the error in normalized units: each variable's error is divided by the variance of its typical 6 h change, and multiplied by its loss weight in `neural_lam/constants.py`.
+This makes the loss unitless and dominated by `t2m` (weight 1.0) and the lower pressure levels.
+Use it to compare runs and models, not as a physical error.
+Losses are only comparable between runs with the same `--loss`, variables, weights and normalization statistics.
+
+* `test_loss_unrollN` is the loss at lead time N steps (N × 6 h), averaged over all test forecasts. It should grow with lead time; errors accumulate as the model feeds its own predictions back in.
+* `test_mean_loss` (and `val_mean_loss`) is the average over all lead times.
+* During training, look at `val_mean_loss` rather than `train_loss`: training uses only `--ar_steps` steps, while validation unrolls full forecasts. A falling `train_loss` with a rising `val_mean_loss` means overfitting, which is what `--patience` guards against.
+
+**Errors per variable in physical units.**
+* `test_mae.csv` and `test_rmse.csv` contain the mean absolute error and root mean squared error in each variable's own unit (K, m/s, Pa, ...). Rows are lead times (6 h, 12 h, ..., 114 h), columns are the variables in the order of `param_names` in `neural_lam/constants.py`.
+* `test_mae.pdf` and `test_rmse.pdf` show the same numbers as a heatmap with variables as rows and lead times as columns. The colour is normalized per row, so it shows how the error of each variable grows with lead time, not which variable is worst. Compare variables using the numbers.
+* RMSE is always at least as large as MAE. RMSE much larger than MAE means a few large errors, for example misplaced fronts or precipitation.
+
+**Where the errors are.**
+`spatial_loss_maps/loss_t<N>.pdf` (and `test_loss` images in W&B) show the loss on the map at lead times 1, 2, 3, 5, 10, 15 and 19 steps.
+The grid cells along the edge of the domain are not predicted: they are set to the true ERA5 state at every step, so their error is zero, and they are drawn faded.
+Since information enters through this boundary, look in particular at how the error develops just inside it and over complex terrain.
+The underlying values are saved in `mean_spatial_loss.pt`.
+
+**Example forecasts.**
+With `--n_example_pred`, W&B shows the prediction next to ERA5 for every variable and lead time (`<var>_example_<i>`), and the raw values are saved as `example_pred_<i>.pt` and `example_target_<i>.pt` (shape lead time × grid cell × variable, physical units, grid cells in row-major order over the 106 × 115 lat-lon grid).
+Use these to see whether forecasts become too smooth or drift at long lead times, which the average scores do not show.
+
+**Is the model any good?**
+There is no built-in baseline.
+A simple reference is persistence, i.e. using the last initial state as the forecast for all lead times; a useful model should beat it clearly at every lead time.
+Also check that `val_mean_loss` and `test_mean_loss` are close: a much higher test loss points to overfitting to the validation period through checkpoint selection, or to differences between the two years.
+
+# Modularity
+The Neural-LAM code is designed to modularize the different components involved in training and evaluating neural weather prediction models.
+Models, graphs and data are stored separately and it should be possible to swap out individual components.
+Still, some restrictions are inevitable:
+
+* The graph used has to be compatible with what the model expects. E.g. a hierarchical model requires a hierarchical graph.
+* The graph and data are specific to the limited area under consideration. This is of course true for the data, but also the graph should be created with the exact geometry of the area in mind.
+
+<p align="middle">
+  <img src="figures/neural_lam_setup.png" width="600"/>
+</p>
+
+
+## A note on the limited area setting
+Currently we are using these models on a limited area covering the Nordic region, the so called MEPS area (see [paper](https://arxiv.org/abs/2309.17370)).
+There are still some parts of the code that is quite specific for the MEPS area use case.
+This is in particular true for the mesh graph creation (`create_mesh.py`) and some of the constants used (`neural_lam/constants.py`).
+If there is interest to use Neural-LAM for other areas it is not a substantial undertaking to refactor the code to be fully area-agnostic.
+We would be happy to support such enhancements.
+See the issues https://github.com/joeloskarsson/neural-lam/issues/2, https://github.com/joeloskarsson/neural-lam/issues/3 and https://github.com/joeloskarsson/neural-lam/issues/4 for some initial ideas on how this could be done.
+
+# Using Neural-LAM
+Below follows instructions on how to use Neural-LAM to train and evaluate models.
+
+## Installation
+Follow the steps below to create the neccesary python environment.
+
+1. Install GEOS for your system. For example with `sudo apt-get install libgeos-dev`. This is neccesary for the Cartopy requirement.
+2. Use python 3.9.
+3. Install version 2.0.1 of PyTorch. Follow instructions on the [PyTorch webpage](https://pytorch.org/get-started/previous-versions/) for how to set this up with GPU support on your system.
+4. Install required packages specified in `requirements.txt`.
+5. Install PyTorch Geometric version 2.2.0. This can be done by running
+```
+TORCH="2.0.1"
+CUDA="cu117"
+
+pip install pyg-lib==0.2.0 torch-scatter==2.1.1 torch-sparse==0.6.17 torch-cluster==1.6.1\
+    torch-geometric==2.3.1 -f https://pytorch-geometric.com/whl/torch-${TORCH}+${CUDA}.html
+```
+You will have to adjust the `CUDA` variable to match the CUDA version on your system or to run on CPU. See the [installation webpage](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html) for more information.
+
+## Data
+Datasets should be stored in a directory called `data`.
+See the [repository format section](#format-of-data-directory) for details on the directory structure.
+For the ERA5 data used on this branch, see the [ERA5 data section](#era5-data-this-branch).
+
+
+The full MEPS dataset is available for download [here](https://nextcloud.liu.se/s/meps). See instructions in the file `README.txt` for how to download and extract the full dataset.
+
+A tiny subset of the MEPS data (named `meps_example`) is also available in `example_data.zip`, which can be downloaded from [here](https://liuonline-my.sharepoint.com/:u:/g/personal/joeos82_liu_se/EaUUq6h9og1EsLwJmKAltWwB7zP2gmObe-K8pL6qGYYiGg?e=yQbFuV).
+Download the files and unzip in the neural-lam directory.
+All graphs used in the paper are also available for download at the same link (but can as easily be re-generated using `create_mesh.py`).
+Note that this subset is far too little data to train any useful models, but all scripts can be ran with it.
+It should thus be useful to make sure that your python environment is set up correctly and that all the code can be ran without any issues.
 
 ## Pre-processing
 An overview of how the different scripts and files depend on each other is given in this figure:

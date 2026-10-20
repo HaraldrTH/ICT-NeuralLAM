@@ -1,3 +1,4 @@
+import os
 import random
 import torch
 import pytorch_lightning as pl
@@ -43,6 +44,9 @@ def main():
         help='Path to load model parameters from (default: None)')
     parser.add_argument('--restore_opt', type=int, default=0,
         help='If optimizer state shoudl be restored with model (default: 0 (false))')
+    parser.add_argument('--resume', type=str,
+        help='Path to checkpoint (e.g. last.ckpt) to resume interrupted training '
+        'from, restoring weights, optimizer, epoch and callbacks (default: None)')
     parser.add_argument('--precision', type=str, default=32,
         help='Numerical precision to use for model (32/16/bf16) (default: 32)')
 
@@ -72,6 +76,9 @@ def main():
         help='learning rate (default: 0.001)')
     parser.add_argument('--val_interval', type=int, default=1,
         help='Number of epochs training between each validation run (default: 1)')
+    parser.add_argument('--patience', type=int, default=0,
+        help='Stop training after this many validation runs without improvement '
+        'in val_mean_loss (default: 0 (no early stopping))')
 
     # Evaluation options
     parser.add_argument('--eval', type=str,
@@ -89,6 +96,8 @@ def main():
     assert args.eval_steps >= max(constants.val_step_log_errors), \
             f"eval_steps must be at least {max(constants.val_step_log_errors)}"
     assert args.eval in (None, "val", "test"), f"Unknown eval setting: {args.eval}"
+    assert not (args.resume and (args.eval or args.load)), \
+            "--resume can not be combined with --eval or --load"
 
     # Get an (actual) random run id as a unique identifier
     random_run_id = random.randint(0, 9999)
@@ -155,9 +164,19 @@ def main():
         prefix = prefix + f"eval-{args.eval}-"
     run_name = f"{prefix}{args.model}-{args.processor_layers}x{args.hidden_dim}-"\
             f"{time.strftime('%m_%d_%H')}-{random_run_id:04d}"
+    if args.resume:
+        # Keep saving checkpoints in the directory of the resumed run
+        checkpoint_dir = os.path.dirname(args.resume)
+        run_name = f"resume-{os.path.basename(checkpoint_dir)}"
+    else:
+        checkpoint_dir = f"saved_models/{run_name}"
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=f"saved_models/{run_name}", filename="min_val_loss",
+            dirpath=checkpoint_dir, filename="min_val_loss",
             monitor="val_mean_loss", mode="min", save_last=True)
+    callbacks = [checkpoint_callback]
+    if args.patience > 0:
+        callbacks.append(pl.callbacks.EarlyStopping(monitor="val_mean_loss",
+            mode="min", patience=args.patience))
     logger = pl.loggers.WandbLogger(project=constants.wandb_project, name=run_name,
             config=args)
     trainer = pl.Trainer(max_epochs=args.epochs,
@@ -167,7 +186,7 @@ def main():
                          strategy="auto",
                          logger=logger,
                          log_every_n_steps=1,
-                         callbacks=[checkpoint_callback],
+                         callbacks=callbacks,
                          check_val_every_n_epoch=args.val_interval,
                          precision=args.precision)
 
@@ -189,7 +208,7 @@ def main():
     else:
         # Train model
         trainer.fit(model=model, train_dataloaders=train_loader,
-                val_dataloaders=val_loader)
+                val_dataloaders=val_loader, ckpt_path=args.resume)
 
 if __name__ == "__main__":
     main()
