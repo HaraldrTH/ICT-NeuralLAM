@@ -114,8 +114,7 @@ Training uses AdamW without a learning rate schedule, so rely on early stopping 
 1. Single-step training: `--epochs 100 --patience 10`. Training usually stops before the cap once `val_mean_loss` levels off.
 2. Fine-tuning with a longer unroll, starting from the best single-step checkpoint:
 ```
-python train_model.py --model graph_lam --graph era5_multiscale --ar_steps 4 \
-    --epochs 30 --patience 5 --load saved_models/<run_name>/min_val_loss.ckpt
+python train_model.py --model graph_lam --graph era5_multiscale --ar_steps 4 --epochs 30 --patience 5 --load saved_models/<run_name>/min_val_loss.ckpt
 ```
 Each step costs about 4 times as much with `--ar_steps 4`, so fewer epochs are needed.
 Use the matching `--model` and `--graph` for Hi-LAM models.
@@ -137,8 +136,7 @@ Each run gets a directory `saved_models/<run_name>/` containing
 **Resuming an interrupted run.**
 `--resume` restores weights, optimizer, epoch counter and early stopping state, and keeps writing checkpoints to the same directory:
 ```
-python train_model.py --model graph_lam --graph era5_multiscale --patience 10 \
-    --resume saved_models/<run_name>/last.ckpt
+python train_model.py --model graph_lam --graph era5_multiscale --patience 10 --resume saved_models/<run_name>/last.ckpt
 ```
 Pass the same model options as in the original run. The resumed run is logged as a new W&B run named `resume-<run_name>`.
 `--load` is different: it only loads the weights (and with `--restore_opt 1` the optimizer) and starts a new run from epoch 0, which is what you want for fine-tuning with other settings such as a larger `--ar_steps`.
