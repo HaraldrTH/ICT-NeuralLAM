@@ -82,4 +82,3 @@ saved_models/
 wandb/
 training.log
 hparam_search/
-hparam_search
