@@ -80,3 +80,4 @@ chats/
 graphs/
 saved_models/
 wandb/
+training.log
