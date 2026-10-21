@@ -1,3 +1,4 @@
+--find-links https://data.pyg.org/whl/torch-2.8.0+cu128.html
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0

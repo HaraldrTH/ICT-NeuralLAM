@@ -91,6 +91,14 @@ Surface geopotential is not part of the CDS download; to include it as a grid fe
 Top-of-atmosphere solar radiation is computed from time and position, not read from data.
 `--step_length` is given in hours and must be a multiple of 6.
 
+**Starting from an existing zarr store.**
+If you already have `era5.zarr` (e.g. copied from another machine), steps 1 and 2 can be skipped.
+Place it at `data/era5/era5.zarr` and run step 3 with `--static_only`, which reads the grid from the zarr store instead of the GRIB files:
+```
+python prepare_era5.py --static_only
+```
+followed by the `create_*` scripts as above.
+
 ## Training on ERA5
 Training uses `train_model.py`; `--dataset era5` and `--graph era5_multiscale` are the defaults.
 Results are logged to Weights & Biases, so run `wandb login` first, or set `WANDB_MODE=offline` to only log locally (see [Weights & Biases Integration](#weights--biases-integration)).
