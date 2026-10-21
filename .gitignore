@@ -81,3 +81,4 @@ graphs/
 saved_models/
 wandb/
 training.log
+hparam_search
