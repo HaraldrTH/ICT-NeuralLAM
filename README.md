@@ -30,6 +30,11 @@ If you are working with Neural-LAM feel free to get in touch and/or submit pull 
 # ERA5 data (this branch)
 On this branch the code reads ERA5 data (6-hourly, 0.25°, Nordic area) from a zarr store instead of the MEPS `.npy` samples described below.
 
+First run
+```
+pip install -r "requirements.txt"
+```
+
 ## Steps to download and prepare ERA5 data
 
 **1. Download from CDS**
