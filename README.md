@@ -143,6 +143,52 @@ python train_model.py --model graph_lam --graph era5_multiscale --patience 10 \
 Pass the same model options as in the original run. The resumed run is logged as a new W&B run named `resume-<run_name>`.
 `--load` is different: it only loads the weights (and with `--restore_opt 1` the optimizer) and starts a new run from epoch 0, which is what you want for fine-tuning with other settings such as a larger `--ar_steps`.
 
+## Hyperparameter tuning
+`hparam_search.py` tunes the model with [Optuna](https://optuna.org/). It needs one extra package:
+```
+pip install optuna
+```
+
+Each search (study) tunes one model.
+Each trial runs `train_model.py` unchanged with a new set of arguments and is scored by its best `val_mean_loss`.
+Optuna picks the arguments of the next trial based on the scores so far, and stops trials early (prunes them) when their `val_mean_loss` after an epoch is worse than the median of earlier trials at that epoch.
+The searched arguments and their ranges are set in `suggest_config()` in `hparam_search.py`:
+
+* `--hidden_dim` (32, 64, 128, 256), `--processor_layers` (2 to 8), `--hidden_layers` (1, 2) and `--lr` (1e-4 to 3e-3, log scale).
+* `--mesh_aggr` (sum, mean), only for `graph_lam`.
+
+Check that the search runs on the small subset first:
+```
+python hparam_search.py --study test --n_trials 2 --epochs 2 -- --subset_ds 1
+```
+
+Run a search for each model, one after another, with the same settings so the models are compared fairly:
+```
+python hparam_search.py --model graph_lam --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
+python hparam_search.py --model hi_lam --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
+python hparam_search.py --model hi_lam_parallel --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
+```
+
+* `--model`: Model to tune, `graph_lam` (default), `hi_lam` or `hi_lam_parallel`.
+* `--graph`: Graph to use. Defaults to `era5_multiscale` for `graph_lam` and `era5_hierarchical` for the Hi-LAM models.
+* `--study`: Name of the search, by default the model name. Trial logs are saved in `hparam_search/<study>/` and the results in `hparam_search/optuna.db`. A study belongs to one model and graph, so use a new name to tune e.g. `graph_lam` with the `1level` graph.
+* `--n_trials`: Number of trials to run in this call. Running the same command again continues the study with more trials, also after an interruption (Ctrl-C).
+* `--epochs`, `--patience`: Maximum epochs and early stopping patience of each trial. Short trials are enough to rank settings; train the best ones longer afterwards.
+* `--timeout_h`: Stop a trial after this many hours.
+* `--no_prune`: Run every trial to the end.
+* Arguments after `--` are passed to every trial. Searched arguments given here are not tuned, e.g. `-- --lr 0.001` keeps the learning rate fixed.
+
+Show the best trials, their run directories and how much each argument mattered:
+```
+python hparam_search.py --study graph_lam --summary
+```
+
+**Notes.**
+* Keep `--loss` and the data settings the same within a study, since `val_mean_loss` is only comparable between runs with the same loss (see [Interpreting results](#interpreting-results)).
+* Every trial is a normal training run, so it writes a `saved_models/<run_name>/` directory and a W&B run, grouped and tagged by the study name. Run only one search per study at a time on this single-GPU setup.
+* The test split is not used during the search. After choosing settings, train them with `train_model.py` for the full number of epochs, fine-tune with a longer `--ar_steps` as above, and only then evaluate on the test split.
+* `val_mean_loss` differs somewhat between runs with different `--seed`, so rerun the top 2 to 3 settings with a few seeds before picking one.
+
 ## Testing on ERA5
 Evaluate the best checkpoint on the test split (2025-09-18 to 2026-09-18), with the same model options as in training:
 ```
