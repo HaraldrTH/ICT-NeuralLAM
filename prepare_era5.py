@@ -44,6 +44,33 @@ def open_single_level(path):
     tp_da = tp_da.dropna("time", how="all")
     return surface, tp_da
 
+def save_static_files(static_dir_path, latitude, longitude, args):
+    """
+    Save grid coordinates, border mask and (optionally) surface geopotential
+    latitude: (N_y,) ascending, longitude: (N_x,)
+    """
+    print("Saving static files...")
+    lon_grid, lat_grid = np.meshgrid(longitude, latitude) # (N_y, N_x)
+    np.save(os.path.join(static_dir_path, "nwp_xy.npy"),
+            np.stack((lon_grid, lat_grid)).astype(np.float32)) # (2, N_y, N_x)
+
+    border_mask = np.ones(lon_grid.shape, dtype=bool)
+    border_mask[args.border_width:-args.border_width,
+            args.border_width:-args.border_width] = False
+    np.save(os.path.join(static_dir_path, "border_mask.npy"), border_mask) # (N_y, N_x)
+
+    if args.orography:
+        orography = xr.open_dataset(args.orography)
+        geopotential = orography["z"].squeeze().values
+        if orography.latitude.values[0] > orography.latitude.values[-1]:
+            geopotential = geopotential[::-1]
+        assert geopotential.shape == lon_grid.shape, \
+                "Orography grid does not match data grid"
+        np.save(os.path.join(static_dir_path, "surface_geopotential.npy"),
+                geopotential.astype(np.float32)) # (N_y, N_x)
+    else:
+        print("No orography given, skipping surface_geopotential.npy")
+
 def main():
     parser = ArgumentParser(description='Convert ERA5 GRIB files to zarr store')
     parser.add_argument('--grib_dir', type=str, default="data/era5grib",
@@ -58,12 +85,21 @@ def main():
         help='Number of grid cells along each edge used as boundary (default: 5)')
     parser.add_argument('--block_size', type=int, default=124,
         help='Number of time steps to convert at a time (default: 124)')
+    parser.add_argument('--static_only', action='store_true',
+        help='Only create static files, reading the grid from an existing zarr '
+        'store instead of GRIB files')
     args = parser.parse_args()
 
     dataset_dir = os.path.join("data", args.dataset)
     static_dir_path = os.path.join(dataset_dir, "static")
     os.makedirs(static_dir_path, exist_ok=True)
     store_path = os.path.join(dataset_dir, constants.zarr_name)
+
+    if args.static_only:
+        store = xr.open_zarr(store_path)
+        save_static_files(static_dir_path, store.latitude.values,
+                store.longitude.values, args)
+        return
 
     print("Opening single level data...")
     surface, tp = open_single_level(os.path.join(args.grib_dir, "single_level",
@@ -143,28 +179,7 @@ def main():
         print(f"Warning: time steps in data are not all {constants.data_step_hours} h, "
                 f"found {steps}")
 
-    # -- Static files --
-    print("Saving static files...")
-    lon_grid, lat_grid = np.meshgrid(longitude, latitude) # (N_y, N_x)
-    np.save(os.path.join(static_dir_path, "nwp_xy.npy"),
-            np.stack((lon_grid, lat_grid)).astype(np.float32)) # (2, N_y, N_x)
-
-    border_mask = np.ones(lon_grid.shape, dtype=bool)
-    border_mask[args.border_width:-args.border_width,
-            args.border_width:-args.border_width] = False
-    np.save(os.path.join(static_dir_path, "border_mask.npy"), border_mask) # (N_y, N_x)
-
-    if args.orography:
-        orography = xr.open_dataset(args.orography)
-        geopotential = orography["z"].squeeze().values
-        if orography.latitude.values[0] > orography.latitude.values[-1]:
-            geopotential = geopotential[::-1]
-        assert geopotential.shape == lon_grid.shape, \
-                "Orography grid does not match data grid"
-        np.save(os.path.join(static_dir_path, "surface_geopotential.npy"),
-                geopotential.astype(np.float32)) # (N_y, N_x)
-    else:
-        print("No orography given, skipping surface_geopotential.npy")
+    save_static_files(static_dir_path, latitude, longitude, args)
 
 if __name__ == "__main__":
     main()
