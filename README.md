@@ -30,7 +30,7 @@ If you are working with Neural-LAM feel free to get in touch and/or submit pull 
 # ERA5 data (this branch)
 On this branch the code reads ERA5 data (6-hourly, 0.25°, Nordic area) from a zarr store instead of the MEPS `.npy` samples described below.
 
-First run
+First install Python 3.9 and run
 ```
 pip install -r "requirements.txt"
 ```
@@ -162,9 +162,9 @@ python hparam_search.py --study test --n_trials 2 --epochs 2 -- --subset_ds 1
 
 Run a search for each model, one after another, with the same settings so the models are compared fairly:
 ```
-python hparam_search.py --model graph_lam --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
-python hparam_search.py --model hi_lam --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
-python hparam_search.py --model hi_lam_parallel --n_trials 30 --epochs 30 --patience 5 -- --batch_size 4
+python hparam_search.py --model graph_lam --n_trials 30 --epochs 30 --patience 0 -- --batch_size 4
+python hparam_search.py --model hi_lam --n_trials 30 --epochs 30 --patience 0 -- --batch_size 4
+python hparam_search.py --model hi_lam_parallel --n_trials 30 --epochs 30 --patience 0 -- --batch_size 4
 ```
 
 * `--model`: Model to tune, `graph_lam` (default), `hi_lam` or `hi_lam_parallel`.
