@@ -84,13 +84,14 @@ class WeatherDataset(torch.utils.data.Dataset):
     subsample_step: number of data time steps (6 h) per model time step
     """
     def __init__(self, dataset_name, pred_length=19, split="train", subsample_step=1,
-            standardize=True, subset=False, control_only=False):
+            standardize=True, subset=False, control_only=False, return_metadata=False):
         super().__init__()
 
         assert split in ("train", "val", "test"), "Unknown dataset split"
         self.dataset_name = dataset_name
         self.sample_length = pred_length + 2 # 2 init states
         self.subsample_step = subsample_step
+        self.return_metadata = return_metadata
         self._ds = None # Opened lazily in each worker process
 
         ds = open_store(dataset_name)
@@ -202,4 +203,21 @@ class WeatherDataset(torch.utils.data.Dataset):
             ), dim=2) # (N_t-2, N_grid, 3*d_forcing)
         # Now index 0 of ^ corresponds to forcing at index 0-2 of sample
 
-        return init_states, target_states, static_features, forcing_windowed
+        sample = (init_states, target_states, static_features, forcing_windowed)
+
+        if not self.return_metadata:
+                return sample
+
+        initialization_time = torch.tensor(
+        sample_times[1].astype("datetime64[s]").astype(np.int64),
+        dtype=torch.int64,
+        )
+        valid_times = torch.from_numpy(
+        sample_times[2:].astype("datetime64[s]").astype(np.int64).copy()
+        )
+
+        metadata = {
+        "initialization_time_unix_s": initialization_time,
+        "valid_time_unix_s": valid_times,
+        }
+        return (*sample, metadata)

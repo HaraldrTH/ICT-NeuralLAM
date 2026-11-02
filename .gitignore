@@ -82,3 +82,5 @@ saved_models/
 wandb/
 training.log
 hparam_search/
+evaluation_results/
+tests/

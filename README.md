@@ -487,3 +487,274 @@ Entries 0 in these lists describe edges between the lowest levels 1 and 2.
 # Contact
 If you are interested in machine learning models for LAM, have questions about our implementation or ideas for extending it, feel free to get in touch.
 You can open a github issue on this page, or (if more suitable) send an email to [joel.oskarsson@liu.se](mailto:joel.oskarsson@liu.se).
+
+## Config-driven evaluation (evaluation framework)
+
+The evaluation framework in `neural_lam/evaluation/` provides reusable metric,
+configuration, and result-writing helpers. The example configuration is
+`evaluation_configs/evaluation.yaml`. It specifies the dataset and split,
+forecast lead times, requested metrics, batch size, output directory, and
+output format.
+
+**Integration status:** `train_model.py` reads the YAML configuration and
+passes the evaluation settings to the model. A small end-to-end evaluation
+with forecast caching has completed successfully. For example:
+
+```text
+python train_model.py --model <model-architecture> --graph <graph-name> --load <checkpoint.ckpt> --eval_config evaluation_configs/evaluation.yaml --evaluation_model_id <model-label>
+```
+
+Use the matching architecture and graph settings for each trained checkpoint.
+Run the same evaluation configuration for all four project models—1L-LAM,
+Graphcast-LAM, HI-LAM, and HI-LAM-Parallel—and retain a distinct model label
+and checkpoint identifier for each run. The YAML configuration defines the
+shared evaluation settings; it does not replace the architecture settings
+required to load a checkpoint.
+
+`lead_hours` is expressed in hours after initialization. Leads must be
+multiples of `step_length_hours`, and the greatest requested lead determines
+the minimum rollout length. For example, a 114-hour maximum lead at a
+6-hour step requires 19 prediction steps. A configuration may request selected
+leads while the model rolls out all intermediate steps; metrics are then
+reported for the selected leads.
+
+### Structured result files
+
+The output is a tidy metrics table under the configured
+`output_dir`, with CSV as the default and Parquet as an option. Each row
+identifies a model/checkpoint, lead time, variable, unit, metric, value,
+valid grid-cell forecast sample count, and (when area weights are used) the
+total metric weight. The count is the number of unmasked grid-cell values
+across forecast initializations, not just the number of initialization times.
+There is one row per metric, lead time, and variable. This makes results
+straightforward to filter or plot without rerunning inference.
+
+The run metadata JSON is saved beside the table and records the configuration,
+split, model and checkpoint identifiers, and other settings needed to
+reproduce the evaluation. Forecast-time metadata is also written as a separate
+CSV. Full predictions are not part of these tabular result files; when caching
+is enabled, they are stored separately in the Zarr store described below.
+
+The helper can write Parquet through pandas, but Parquet output also requires
+an installed engine such as `pyarrow` or `fastparquet`. CSV output does not
+require an extra package.
+
+### Reusable forecast cache (Zarr)
+
+When `save_forecast_cache` is enabled in the evaluation YAML, each evaluation
+run writes a separate Zarr store under `prediction_store_dir`. The store
+contains physical-unit `prediction` and `target` arrays with dimensions
+`(initialization, lead, y, x, variable)`, along with the latest observed
+state, initialization and valid times, lead hours, coordinates, land–sea and
+boundary masks, units, subset selection, and run metadata. Forecast batches are written as
+inference proceeds; an interrupted store remains marked incomplete and is
+rejected by the reader unless explicitly opened with
+`require_complete=False`.
+The current cache stores every rollout lead, even when `lead_hours` selects
+only a subset for the configured metric output.
+
+A `.zarr` path is a directory-backed dataset, not a collection of individual
+files named after predicted values. Its array directories contain metadata
+files and compressed binary chunks. For example, `prediction/0.1.0.0.0` is
+the chunk at chunk-index coordinates `(initialization=0, lead=1, y=0, x=0,
+variable=0)`; it is not a forecast value. In the current chunk layout, each
+prediction chunk contains one initialization, one lead, the full grid, and
+all variables. This supports efficient access to selected forecast
+cases/leads without parsing or loading the entire dataset.
+
+### Recompute metrics offline
+
+The cached forecasts can be scored again without loading a checkpoint or
+running inference. The offline evaluator reads one initialization at a time,
+uses the dataset's saved training standard deviations for normalized metrics,
+uses the cached latest observed state for persistence, and excludes boundary
+cells using the mask in the cache:
+
+```powershell
+.\.venv\Scripts\python.exe -m neural_lam.evaluation.offline_metrics `
+  --cache evaluation_results\predictions\<cache-name>.zarr `
+  --config evaluation_configs\evaluation.yaml
+```
+
+It writes a separate `*_offline_metrics.csv` (or Parquet) and metadata JSON
+under the configured `output_dir`, leaving inference-time results untouched.
+The config's dataset and split must match the cache; requested leads and
+variables must be present in it. The cache's physical-unit prediction and
+target arrays are scored with MAE/RMSE, normalized MAE/RMSE, persistence
+errors, and persistence skill according to the requested metrics.
+
+Offline evaluation also adds derived 10 m wind-speed records when both
+`u10` and `v10` are selected, plus configured variable-group and lead-group
+summaries. Variable-group scores are unweighted means of the member variables'
+normalized scores; lead-group scores are unweighted means over the configured
+lead times. The per-variable and per-lead records remain available alongside
+these summaries.
+
+By default, SST metrics exclude land-dominant cells (`land_sea_mask >= 0.5`).
+SST normalization uses the standard deviation of training-split SST over
+interior ocean-dominant cells (`land_sea_mask < 0.5`). This differs from the
+legacy `parameter_std.pt` SST statistic, which was calculated over all grid
+cells, including filled land SST and boundary cells. The model's saved
+normalization is not changed; this policy applies only to offline metric
+interpretation. The run metadata records the masks and derived statistics.
+Set `exclude_land_sst: false` only to reproduce the legacy all-cell SST
+metric; that score includes cells where SST is undefined over land.
+
+The current ERA5 audit found `parameter_std.pt` stores an SST standard
+deviation of about 5.316 K. Recomputed over training-split interior
+ocean-dominant cells, the standard deviation is about 4.643 K. The derived
+training standard deviation for 10 m wind speed is about 3.710 m/s. These
+statistics are written into the offline run metadata.
+
+### Regional and extreme-weather metrics
+
+The evaluation YAML can enable geographic metrics and threshold-based event
+verification:
+
+```yaml
+spatial_regions:
+  enabled: true
+  scope: full_grid
+  coastal_distance_km: 25
+
+extreme_events:
+  enabled: true
+  lower_percentile: 1
+  upper_percentile: 99
+  precipitation: false
+```
+
+Regional masks cover the full ERA5 grid and split cells into coastal land,
+inland land, nearshore sea, and offshore sea. Land is classified where the
+fractional land-sea mask is at least 0.5. The configured coastal distance is
+currently a great-circle distance between a grid-cell center and the nearest
+opposite land/sea-class cell center, not a distance to a vector coastline.
+This raster-based approximation and the selected 25 km band are recorded in
+metadata; inspect region maps and consider sensitivity tests before treating
+small coastal/inland differences as definitive. Regional MAE/RMSE and
+normalized scores use cosine-of-latitude area weights and exclude
+boundary-forced cells. Land-dominant SST cells are excluded as in the global
+offline metrics.
+
+You can replace those default bands with named regions for a particular
+offline evaluation. A region can use a GeoJSON polygon, a longitude/latitude
+bounding box, a land/sea class, and/or a distance band from the land-sea
+boundary. For example:
+
+```yaml
+spatial_regions:
+  enabled: true
+  regions:
+    norway_coastal_land:
+      polygon_file: boundaries/norway.geojson
+      land_sea: land
+      max_coast_distance_km: 25
+    norway_inland:
+      polygon_file: boundaries/norway.geojson
+      land_sea: land
+      min_coast_distance_km: 25
+    ocean:
+      land_sea: sea
+    norwegian_sea_box:
+      polygon_file: boundaries/norwegian_sea.geojson
+      land_sea: sea
+```
+
+GeoJSON paths are relative to the evaluation YAML file and should describe
+valid Polygon/MultiPolygon geometries in longitude/latitude coordinates using
+the same longitude convention as the cached grid. A bounding-box definition
+can replace `polygon_file`, using `[min_longitude, min_latitude,
+max_longitude, max_latitude]`. If `regions` is present, its names replace the
+default global/coastal region set for that evaluation; if it is omitted, the
+default set is used. You may define several masks in one run or use separate
+evaluation YAML files to compute different focused subsets from the same
+cache. Region definitions are recorded in the output metadata.
+
+The land/sea mask identifies land versus water, not country borders or named
+seas. For Norway-only scores, supply an appropriate Norway polygon; for a
+specific ocean/sea, supply its polygon or a documented bounding box. Grid
+cells are selected by whether their centers fall within the geometry. This
+does not apportion cells that straddle a region boundary.
+
+Preview the selected cells (including the boundary-cell exclusion) before
+interpreting regional scores:
+
+```powershell
+.\.venv\Scripts\python.exe -m neural_lam.evaluation.plot_spatial_regions `
+  --cache evaluation_results\predictions\<cache-name>.zarr `
+  --config evaluation_configs\evaluation.yaml `
+  --output evaluation_results\figures\region_masks.png
+```
+
+The preview uses blue for sea, gray for land, and red for cells selected by
+each configured region. It does not retrieve a coastline or country boundary
+from an external service; those are represented only if the corresponding
+polygon file is supplied.
+
+Extreme thresholds are empirical percentiles computed from the entire
+training split over all interior grid cells, using physical-unit data. The
+default 99th/1st percentiles detect high/low 2 m temperature, low mean sea
+level pressure, and high derived 10 m wind speed. The same threshold is used
+for every forecast lead and region. Outputs include POD, precision, false
+alarm ratio, CSI, frequency bias, and MAE/RMSE over observed extremes; the
+metadata stores threshold values, units, percentiles, and sample scope.
+Contingency scores use cosine-of-latitude area weights. These are grid-cell
+event samples, not counts of distinct meteorological storm systems.
+
+Precipitation events are deliberately disabled. The `tp` accumulation
+interval has not been verified; setting `extreme_events.precipitation: true`
+is rejected rather than silently applying an ambiguous threshold. Fractions
+Skill Score (FSS), map-ready per-grid-cell error outputs, and sensitivity
+analysis are not yet implemented. To calculate these additions from the
+existing forecasts, rerun only the offline command above; model inference is
+not required.
+
+Use the Zarr API to inspect or slice the cache:
+
+```python
+import zarr
+
+group = zarr.open_group(
+    "evaluation_results/predictions/<cache-name>.zarr", mode="r"
+)
+print(group["prediction"].shape)
+print(group["lead_hours"][:])
+one_forecast = group["prediction"][0, 0, :, :, :]
+```
+
+CSV and Parquet remain appropriate for the much smaller metric tables. Saving
+every grid-cell prediction as CSV would flatten a large multidimensional
+dataset, repeat coordinates and identifiers, use substantially more space,
+and make selective reads slower. Export a selected variable, lead, or case to
+CSV only when a tabular slice is specifically needed. A 50-initialization
+smoke cache occupied about 1.93 GiB on disk; full-run storage should be
+estimated before evaluating all models.
+
+### Interpreting normalized metrics and persistence skill
+
+`normalized_mae` and `normalized_rmse` divide each variable's physical-unit
+MAE or RMSE by that variable's standard deviation computed from the training
+data. They are unitless, so they help compare relative errors across
+temperature, wind, pressure, and other variables with different units and
+scales. Lower values indicate smaller errors relative to the variable's
+training-data spread. They are not percentages, and should not be confused
+with the training loss, which uses the standard deviation of forecast-step
+differences and the configured loss weights. Use the same training
+statistics, variables, and spatial mask for every model comparison.
+
+The persistence baseline repeats the latest observed state at every forecast
+lead. Persistence skill is computed as
+`1 - model_error / persistence_error`, separately for MAE and RMSE:
+
+* Positive skill means the model error is lower than persistence. For example,
+  `0.2` means 20% lower error than the baseline.
+* Zero means the model and persistence have equal error.
+* Negative skill means persistence performs better.
+* If persistence error is zero, the skill is undefined and should be reported
+  as missing rather than interpreted as a finite score.
+
+Compare model and persistence errors on identical forecast initializations,
+leads, variables, and valid grid cells. In particular, exclude the
+boundary-forced cells: the model receives reference ERA5 values there during
+rollout, so including them would make both the model evaluation and baseline
+comparison misleading.

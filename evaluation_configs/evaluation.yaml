@@ -1,0 +1,114 @@
+dataset: era5
+split: test
+
+# Forecast lead times in hours. Select leads available from the model's rollout.
+lead_hours:
+  - 6
+  - 12
+  - 18
+  - 30
+  - 60
+  - 90
+  - 114
+step_length_hours: 6
+
+metrics:
+  - mae
+  - rmse
+  - normalized_mae
+  - normalized_rmse
+  - mae_skill_vs_persistence
+  - rmse_skill_vs_persistence
+
+# Null means use every variable in neural_lam.constants.param_names.
+variables: null
+
+variable_groups:
+  surface_temperature:
+    - t2m
+    - d2m
+    - sst
+  surface_wind_components:
+    - u10
+    - v10
+  pressure:
+    - msl
+  upper_air_wind_components:
+    - u_500
+    - u_700
+    - u_850
+    - u_925
+    - v_500
+    - v_700
+    - v_850
+    - v_925
+  moisture:
+    - q_500
+    - q_700
+    - q_850
+    - q_925
+    - tp
+
+lead_groups:
+  short:
+    - 6
+    - 12
+    - 18
+    - 24
+  medium:
+    - 30
+    - 36
+    - 42
+    - 48
+  extended:
+    - 54
+    - 60
+    - 66
+    - 72
+    - 78
+    - 84
+  long:
+    - 90
+    - 96
+    - 102
+    - 108
+    - 114
+
+# Exclude land-dominant SST cells (land-sea mask >= 0.5) from SST scores.
+exclude_land_sst: true
+
+spatial_regions:
+  enabled: true
+  # Full ERA5 grid. Distances are great-circle center-to-opposite-class-cell
+  # distances; this is a raster-based approximation to shoreline distance.
+  scope: full_grid
+  coastal_distance_km: 25
+  # Optional named regions replace the default full-grid bands when provided.
+  # Paths are relative to this YAML. Use the same longitude convention as ERA5.
+  # regions:
+  #   norway_coastal_land:
+  #     polygon_file: boundaries/norway.geojson
+  #     land_sea: land
+  #     max_coast_distance_km: 25
+  #   norway_inland:
+  #     polygon_file: boundaries/norway.geojson
+  #     land_sea: land
+  #     min_coast_distance_km: 25
+  #   ocean:
+  #     land_sea: sea
+
+extreme_events:
+  enabled: true
+  lower_percentile: 1
+  upper_percentile: 99
+  # tp accumulation semantics must be verified before precipitation events.
+  precipitation: false
+
+batch_size: 4
+num_workers: 0
+output_dir: evaluation_results/metrics
+results_format: csv
+
+# Opt in after checking available disk space.
+save_forecast_cache: True
+prediction_store_dir: evaluation_results/predictions

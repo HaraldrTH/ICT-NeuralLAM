@@ -7,6 +7,10 @@ import wandb
 import matplotlib.pyplot as plt
 
 from neural_lam import utils, vis, constants
+from neural_lam.evaluation.accumulators import StreamingMetricAccumulator
+from neural_lam.evaluation.persistence import persistence_forecast
+from neural_lam.evaluation.results_io import write_results, write_run_metadata
+from neural_lam.evaluation.forecast_cache import ZarrForecastCache
 
 class ARModel(pl.LightningModule):
     """
@@ -51,8 +55,11 @@ class ARModel(pl.LightningModule):
 
         self.step_length = args.step_length # Number of hours per pred. step
         self.val_maes = []
-        self.test_maes = []
-        self.test_mses = []
+        
+        self.eval_metrics = None
+        self.forecast_metadata = []
+        self.evaluation_model_id = getattr(args, "evaluation_model_id", self.__class__.__name__)
+        self.evaluation_checkpoint_id = getattr(args, "load", None)
 
         # For making restoring of optimizer state optional (slight hack)
         self.opt_state = None
@@ -61,8 +68,26 @@ class ARModel(pl.LightningModule):
         self.n_example_pred = args.n_example_pred
         self.plotted_examples = 0
 
-        # For storing spatial loss maps during evaluation
-        self.spatial_loss_maps = []
+        self.evaluation_dataset = args.dataset
+        self.evaluation_steps = getattr(args, "eval_steps", 19)
+        self.evaluation_subset = bool(getattr(args, "subset_ds", False))
+        self.evaluation_graph = getattr(args, "graph", None)
+        self.evaluation_model_id = (getattr(args, "evaluation_model_id", None) or self.__class__.__name__)
+        self.evaluation_checkpoint_id = getattr(args, "load", None)
+        self.evaluation_split = getattr(args, "eval", None) or "test"
+        self.evaluation_lead_hours = getattr(args, "evaluation_lead_hours", None)
+        self.evaluation_metrics = getattr(args, "evaluation_metrics", None)
+        self.evaluation_variables = getattr(args, "evaluation_variables", None)
+        self.evaluation_output_dir = getattr(args, "evaluation_output_dir", None)
+        self.evaluation_results_format = getattr(args, "evaluation_results_format", "csv")
+        self.evaluation_config_path = getattr(args, "evaluation_config_path", None)
+        self.save_forecast_cache = getattr(args, "save_forecast_cache", False)
+        self.prediction_store_dir = getattr(args, "prediction_store_dir", "evaluation_results/predictions")
+        self.forecast_cache = None
+
+        self.spatial_loss_sum = None
+        self.spatial_loss_sample_count = 0
+
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, betas=(0.9, 0.95))
@@ -149,7 +174,7 @@ class ARModel(pl.LightningModule):
         forcing_features: (B, pred_steps, N_grid, d_forcing), where index 0
             corresponds to index 1 of init_states
         """
-        init_states, target_states, batch_static_features, forcing_features = batch
+        init_states, target_states, batch_static_features, forcing_features = batch[:4]
 
         prediction = self.unroll_prediction(init_states, batch_static_features,
                 forcing_features, target_states) # (B, pred_steps, N_grid, d_f)
@@ -250,6 +275,57 @@ class ARModel(pl.LightningModule):
         """
         prediction, target = self.common_step(batch)
 
+        # Convert standardized states to physical units.
+        std = self.data_std.view(1, 1, 1, -1)
+        mean = self.data_mean.view(1, 1, 1, -1)
+
+        prediction_physical = prediction * std + mean
+        target_physical = target * std + mean
+
+        # Persistence repeats the latest observed input state.
+        latest_observation = batch[0][:, 1] * self.data_std + self.data_mean
+        baseline = persistence_forecast(latest_observation, prediction.shape[1])
+
+        if self.eval_metrics is None:
+            lead_hours = [self.step_length * (i + 1)
+                          for i in range(prediction.shape[1])]
+            self.eval_metrics = StreamingMetricAccumulator(
+                variable_names=constants.param_names,
+                lead_hours=lead_hours,
+                training_std=self.data_std.detach().cpu().numpy(),
+                variable_units=constants.param_units,
+            )
+
+        valid_mask = self.interior_mask[:, 0].bool().view(1, 1, -1, 1)
+
+        self.eval_metrics.update(prediction_physical,
+                                 target_physical,
+                                 persistence_prediction=baseline,
+                                 valid_mask=valid_mask,)
+
+        if len(batch) > 4:
+            metadata = batch[4]
+        elif self.forecast_cache is not None:
+            raise RuntimeError("Forecast caching requires dataset timestamp metadata")
+
+        if len(batch) > 4:
+            metadata = batch[4]
+            if self.forecast_cache is not None:
+                self.forecast_cache.append(prediction_physical, target_physical,
+                                           latest_observation, metadata)
+            initialization_times = (metadata["initialization_time_unix_s"].detach().cpu().tolist())
+            valid_times = metadata["valid_time_unix_s"].detach().cpu().tolist()
+
+            for initialization_time, sample_valid_times in zip(initialization_times, valid_times):
+                for lead_index, valid_time in enumerate(sample_valid_times):
+                    self.forecast_metadata.append({
+                        "model_id": self.evaluation_model_id,
+                        "checkpoint_id": self.evaluation_checkpoint_id,
+                        "initialization_time_unix_s": int(initialization_time),
+                        "valid_time_unix_s": int(valid_time),
+                        "lead_hours": self.step_length * (lead_index + 1),
+                    })
+
         time_step_loss = torch.mean(self.weighted_loss(prediction,
             target), dim=0) # (time_steps-1)
         mean_loss = torch.mean(time_step_loss)
@@ -263,15 +339,19 @@ class ARModel(pl.LightningModule):
 
         # For error maps
         maes = self.per_var_error(prediction, target) # (B, pred_steps, d_f)
-        self.test_maes.append(maes)
         mses = self.per_var_error(prediction, target, error="mse") # (B, pred_steps, d_f)
-        self.test_mses.append(mses)
 
-        # Save per-sample spatial loss for specific times
         spatial_loss = self.weighted_loss(prediction, target,
-                reduce_spatial_dim=False) # (B, pred_steps, N_grid)
-        log_spatial_losses = spatial_loss[:,constants.val_step_log_errors-1]
-        self.spatial_loss_maps.append(log_spatial_losses) # (B, N_log, N_grid)
+                                          reduce_spatial_dim=False,
+                                          )
+        log_spatial_losses = spatial_loss[:, constants.val_step_log_errors - 1]
+
+        batch_spatial_sum = log_spatial_losses.detach().sum(dim=0)
+        if self.spatial_loss_sum is None:
+            self.spatial_loss_sum = torch.zeros_like(batch_spatial_sum)
+
+        self.spatial_loss_sum += batch_spatial_sum
+        self.spatial_loss_sample_count += log_spatial_losses.shape[0]
 
         # Plot example predictions (on rank 0 only)
         if self.trainer.is_global_zero and self.plotted_examples < self.n_example_pred:
@@ -329,67 +409,179 @@ class ARModel(pl.LightningModule):
                 torch.save(target_slice.cpu(),os.path.join(
                     wandb.run.dir, f'example_target_{self.plotted_examples}.pt'))
 
+    def on_test_epoch_start(self):
+        self.eval_metrics = None
+        self.forecast_metadata = []
+        self.spatial_loss_sum = None
+        self.spatial_loss_sample_count = 0
+        self.plotted_examples = 0
+        self.forecast_cache = None
+        if not self.save_forecast_cache:
+            return
+        if wandb.run is None:
+            raise RuntimeError("A W&B run must be active when forecast caching is enabled")
+
+        from neural_lam.weather_dataset import open_store
+
+        dataset = open_store(self.evaluation_dataset)
+        try:
+            latitude = dataset.latitude.values.copy()
+            longitude = dataset.longitude.values.copy()
+            land_sea_mask = dataset.lsm.values.copy()
+        finally:
+            dataset.close()
+
+        model_slug = "".join(
+            char if char.isalnum() or char in "-_." else "_"
+            for char in self.evaluation_model_id
+        )
+        checkpoint_name = os.path.splitext(
+            os.path.basename(self.evaluation_checkpoint_id or "uncheckpointed")
+        )[0]
+        cache_path = os.path.join(
+            self.prediction_store_dir,
+            f"{model_slug}_{self.evaluation_split}_"
+            f"{checkpoint_name}_{wandb.run.id}.zarr",
+        )
+
+        lead_hours = [
+            self.step_length * (index + 1)
+            for index in range(self.evaluation_steps)
+        ]
+
+        self.forecast_cache = ZarrForecastCache(
+            cache_path,
+            model_id=self.evaluation_model_id,
+            checkpoint_id=self.evaluation_checkpoint_id,
+            dataset=self.evaluation_dataset,
+            split=self.evaluation_split,
+            graph=self.evaluation_graph,
+            config_path=self.evaluation_config_path,
+            subset=self.evaluation_subset,
+            step_length_hours=self.step_length,
+            lead_hours=lead_hours,
+            variable_names=constants.param_names,
+            variable_units=constants.param_units,
+            latitude=latitude,
+            longitude=longitude,
+            land_sea_mask=land_sea_mask,
+            boundary_mask=self.border_mask.detach().cpu().numpy().reshape(
+                *constants.grid_shape
+            ),
+        )
+
     def on_test_epoch_end(self):
         """
         Compute test metrics and make plots at the end of test epoch.
         Will gather stored tensors and perform plotting and logging on rank 0.
         """
-        # Create error maps for RMSE and MAE
-        test_mae_tensor = self.all_gather_cat(torch.cat(self.test_maes,
-            dim=0)) # (N_test, pred_steps, d_f)
-        test_mse_tensor = self.all_gather_cat(torch.cat(self.test_mses,
-            dim=0)) # (N_test, pred_steps, d_f)
+        
+        if self.eval_metrics is None:
+            raise RuntimeError("No evaluation batches were accumulated")
+        
+        if self.forecast_cache is not None:
+            self.forecast_cache.finish()
+        
+        metric_values = self.eval_metrics.compute()
 
         if self.trainer.is_global_zero:
-            test_mae_rescaled = torch.mean(test_mae_tensor,
-                    dim=0) * self.data_std # (pred_steps, d_f)
-            test_rmse_rescaled = torch.sqrt(torch.mean(test_mse_tensor,
-                    dim=0)) * self.data_std # (pred_steps, d_f)
+            test_mae_rescaled = torch.as_tensor(metric_values["mae"],
+                                                device=self.data_std.device,
+                                                dtype=self.data_std.dtype,)
+            test_rmse_rescaled = torch.as_tensor(metric_values["rmse"],
+                                                 device=self.data_std.device,
+                                                 dtype=self.data_std.dtype,)
 
             mae_fig = vis.plot_error_map(test_mae_rescaled, step_length=self.step_length)
             rmse_fig = vis.plot_error_map(test_rmse_rescaled, step_length=self.step_length)
-            wandb.log({ # Log png:s
-                "test_mae": wandb.Image(mae_fig),
-                "test_rmse": wandb.Image(rmse_fig),
-                })
-            # Save pdf:s
+            wandb.log({"test_mae": wandb.Image(mae_fig),
+                       "test_rmse": wandb.Image(rmse_fig)})
+
+            os.makedirs(wandb.run.dir, exist_ok=True)
             mae_fig.savefig(os.path.join(wandb.run.dir, "test_mae.pdf"))
             rmse_fig.savefig(os.path.join(wandb.run.dir, "test_rmse.pdf"))
-            # Save errors also as csv:s
             np.savetxt(os.path.join(wandb.run.dir, "test_mae.csv"),
-                    test_mae_rescaled.cpu().numpy(), delimiter=",")
+                       test_mae_rescaled.cpu().numpy(),delimiter=",")
             np.savetxt(os.path.join(wandb.run.dir, "test_rmse.csv"),
-                    test_rmse_rescaled.cpu().numpy(), delimiter=",")
+                       test_rmse_rescaled.cpu().numpy(), delimiter=",")
 
-        self.test_maes.clear() # Free memory
-        self.test_mses.clear()
+        if self.trainer.is_global_zero:
+            metric_records = self.eval_metrics.to_records(
+                model_id=self.evaluation_model_id,
+                checkpoint_id=self.evaluation_checkpoint_id,
+                metadata={"split": self.evaluation_split},
+                metric_names=self.evaluation_metrics)
+
+            if self.evaluation_lead_hours is not None:
+                selected_leads = set(self.evaluation_lead_hours)
+                metric_records = [record for record in metric_records
+                                  if record["lead_hours"] in selected_leads]
+
+            if self.evaluation_variables is not None:
+                selected_variables = set(self.evaluation_variables)
+                metric_records = [record for record in metric_records
+                                  if record["variable"] in selected_variables]
+
+            results_format = self.evaluation_results_format
+            output_dir = self.evaluation_output_dir or wandb.run.dir
+            os.makedirs(output_dir, exist_ok=True)
+
+            checkpoint_name = os.path.splitext(
+                os.path.basename(self.evaluation_checkpoint_id or "uncheckpointed"))[0]
+            result_stem = (f"{self.evaluation_model_id.replace(' ', '_')}_"
+                           f"{self.evaluation_split}_{checkpoint_name}")
+
+            write_results(metric_records,
+                          os.path.join(output_dir, f"{result_stem}_metrics.{results_format}"),
+                          file_format=results_format)
+
+            write_run_metadata(
+                {
+                    "dataset": self.evaluation_dataset,
+                    "split": self.evaluation_split,
+                    "model_id": self.evaluation_model_id,
+                    "checkpoint_id": self.evaluation_checkpoint_id,
+                    "graph": self.evaluation_graph,
+                    "step_length_hours": self.step_length,
+                    "lead_hours": list(self.evaluation_lead_hours or self.eval_metrics.lead_hours),
+                    "metrics": list(self.evaluation_metrics or self.eval_metrics.compute().keys()),
+                    "variables": list(self.evaluation_variables or constants.param_names),
+                    "config_path": self.evaluation_config_path,
+                    "forecast_cache_path": (str(self.forecast_cache.path)
+                                            if self.forecast_cache is not None else None),
+                }, os.path.join(output_dir, f"{result_stem}_metadata.json"))
+
+            if self.forecast_metadata:
+                write_results(self.forecast_metadata,
+                    os.path.join(output_dir, f"{result_stem}_forecast_metadata.csv"),
+                    file_format="csv")
 
         # Plot spatial loss maps
-        spatial_loss_tensor = self.all_gather_cat(torch.cat(self.spatial_loss_maps,
-                dim=0)) # (N_test, N_log, N_grid)
+        if self.spatial_loss_sum is None or self.spatial_loss_sample_count == 0:
+            raise RuntimeError("No spatial loss batches were accumulated")
+
         if self.trainer.is_global_zero:
-            mean_spatial_loss = torch.mean(spatial_loss_tensor, dim=0) # (N_log, N_grid)
+            mean_spatial_loss = (self.spatial_loss_sum / self.spatial_loss_sample_count)
 
-            loss_map_figs = [vis.plot_spatial_error(loss_map, self.interior_mask[:,0],
-                    title=f"Test loss, t={t_i} ({self.step_length*t_i} h)")
-                for t_i, loss_map in zip(constants.val_step_log_errors, mean_spatial_loss)]
+            loss_map_figs = [vis.plot_spatial_error(loss_map,
+                                                    self.interior_mask[:, 0],
+                                                    title=f"Test loss, t={lead} ({self.step_length * lead} h)",)
+                             for lead, loss_map in zip(constants.val_step_log_errors,
+                                                       mean_spatial_loss)]
 
-            # log all to same wandb key, sequentially
             for fig in loss_map_figs:
                 wandb.log({"test_loss": wandb.Image(fig)})
 
-            # also make without title and save as pdf
-            pdf_loss_map_figs = [vis.plot_spatial_error(loss_map, self.interior_mask[:,0])
-                for loss_map in mean_spatial_loss]
+            pdf_loss_map_figs = [vis.plot_spatial_error(loss_map, self.interior_mask[:, 0])
+                                 for loss_map in mean_spatial_loss]
             pdf_loss_maps_dir = os.path.join(wandb.run.dir, "spatial_loss_maps")
             os.makedirs(pdf_loss_maps_dir, exist_ok=True)
-            for t_i, fig in zip(constants.val_step_log_errors,pdf_loss_map_figs):
-                fig.savefig(os.path.join(pdf_loss_maps_dir, f"loss_t{t_i}.pdf"))
-            # save mean spatial loss as .pt file also
-            torch.save(mean_spatial_loss.cpu(),os.path.join(
-                wandb.run.dir, 'mean_spatial_loss.pt'))
 
-        self.spatial_loss_maps.clear()
+            for lead, fig in zip(constants.val_step_log_errors, pdf_loss_map_figs):
+                fig.savefig(os.path.join(pdf_loss_maps_dir, f"loss_t{lead}.pdf"))
+
+            torch.save(mean_spatial_loss.cpu(),
+                       os.path.join(wandb.run.dir, "mean_spatial_loss.pt"))
 
     def on_load_checkpoint(self, ckpt):
         """

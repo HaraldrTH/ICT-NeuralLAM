@@ -1,0 +1,95 @@
+dataset: era5
+split: val
+
+# These are score-reporting leads; the cache stores every rollout lead.
+lead_hours:
+  - 6
+  - 12
+  - 18
+  - 30
+  - 60
+  - 90
+  - 114
+step_length_hours: 6
+
+metrics:
+  - mae
+  - rmse
+  - normalized_mae
+  - normalized_rmse
+  - mae_skill_vs_persistence
+  - rmse_skill_vs_persistence
+
+variables: null
+
+variable_groups:
+  surface_temperature:
+    - t2m
+    - d2m
+    - sst
+  surface_wind_components:
+    - u10
+    - v10
+  pressure:
+    - msl
+  upper_air_wind_components:
+    - u_500
+    - u_700
+    - u_850
+    - u_925
+    - v_500
+    - v_700
+    - v_850
+    - v_925
+  moisture:
+    - q_500
+    - q_700
+    - q_850
+    - q_925
+    - tp
+
+lead_groups:
+  short:
+    - 6
+    - 12
+    - 18
+    - 24
+  medium:
+    - 30
+    - 36
+    - 42
+    - 48
+  extended:
+    - 54
+    - 60
+    - 66
+    - 72
+    - 78
+    - 84
+  long:
+    - 90
+    - 96
+    - 102
+    - 108
+    - 114
+
+exclude_land_sst: true
+
+spatial_regions:
+  enabled: true
+  scope: full_grid
+  coastal_distance_km: 25
+
+extreme_events:
+  enabled: true
+  lower_percentile: 1
+  upper_percentile: 99
+  precipitation: false
+
+batch_size: 4
+num_workers: 0
+output_dir: evaluation_results/metrics
+results_format: csv
+
+save_forecast_cache: true
+prediction_store_dir: evaluation_results/predictions

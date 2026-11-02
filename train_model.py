@@ -15,6 +15,8 @@ from neural_lam.models.hi_lam_parallel import HiLAMParallel
 from neural_lam.weather_dataset import WeatherDataset
 from neural_lam import constants, utils
 
+from neural_lam.evaluation.config import load_evaluation_config
+
 # Checkpoints store the training arguments, allow loading these with weights_only
 torch.serialization.add_safe_globals([Namespace])
 
@@ -87,7 +89,58 @@ def main():
         help='Number of steps to unroll prediction for in val/test (default: 19)')
     parser.add_argument('--n_example_pred', type=int, default=1,
         help='Number of example predictions to plot during evaluation (default: 1)')
+    parser.add_argument("--eval_config", type=str, default=None,
+        help="Path to YAML evaluation config (optional)")
+    parser.add_argument("--evaluation_model_id",type=str,default=None,
+        help="Display label to store with evaluation results")
     args = parser.parse_args()
+
+    eval_config = None
+
+    if args.eval_config:
+        eval_config = load_evaluation_config(args.eval_config)
+
+        if args.eval is not None and args.eval != eval_config.split:
+            parser.error(f"--eval is {args.eval!r}, but the config requests "
+                         f"{eval_config.split!r}")
+        args.eval = eval_config.split
+
+        if not args.load:
+            parser.error("--load is required when using --eval_config")
+        if not args.evaluation_model_id:
+            parser.error("--evaluation_model_id is required with --eval_config "
+                         "so each model has a distinct result label")
+
+        unknown_variables = (set(eval_config.variables or ()) - set(constants.param_names))
+        if unknown_variables:
+            parser.error("Unknown variables in evaluation config: "
+                         + ", ".join(sorted(unknown_variables)))
+
+        args.dataset = eval_config.dataset
+        args.batch_size = eval_config.batch_size
+        args.n_workers = eval_config.num_workers
+        args.step_length = eval_config.step_length_hours
+
+        requested_steps = max(eval_config.lead_hours) // args.step_length
+        args.eval_steps = max(requested_steps, max(constants.val_step_log_errors))
+
+        args.evaluation_lead_hours = eval_config.lead_hours
+        args.evaluation_metrics = eval_config.metrics
+        args.evaluation_variables = eval_config.variables
+        args.evaluation_output_dir = eval_config.output_dir
+        args.evaluation_results_format = eval_config.results_format
+        args.evaluation_config_path = args.eval_config
+        args.save_forecast_cache = eval_config.save_forecast_cache
+        args.prediction_store_dir = eval_config.prediction_store_dir
+    else:
+        args.evaluation_lead_hours = None
+        args.evaluation_metrics = None
+        args.evaluation_variables = None
+        args.evaluation_output_dir = None
+        args.evaluation_results_format = "csv"
+        args.evaluation_config_path = None
+        args.save_forecast_cache = False
+        args.prediction_store_dir = "evaluation_results/predictions"
 
     # Asserts for arguments
     assert args.model in MODELS, f"Unknown model: {args.model}"
@@ -110,7 +163,20 @@ def main():
     subsample_step = args.step_length // constants.data_step_hours # In data steps
 
     train_loader = None
-    val_loader = None
+    val_loader = torch.utils.data.DataLoader(
+                    WeatherDataset(
+                        args.dataset,
+                        pred_length=max_pred_length,
+                        split="val",
+                        subsample_step=subsample_step,
+                        subset=bool(args.subset_ds),
+                        control_only=args.control_only,
+                        return_metadata=True,
+                    ),
+                    args.batch_size,
+                    shuffle=False,
+                    num_workers=args.n_workers,
+                )
 
     if not args.eval:
         train_loader = torch.utils.data.DataLoader(
@@ -124,20 +190,6 @@ def main():
             ),
             args.batch_size,
             shuffle=True,
-            num_workers=args.n_workers,
-        )
-
-        val_loader = torch.utils.data.DataLoader(
-            WeatherDataset(
-                args.dataset,
-                pred_length=max_pred_length,
-                split="val",
-                subsample_step=subsample_step,
-                subset=bool(args.subset_ds),
-                control_only=args.control_only,
-            ),
-            args.batch_size,
-            shuffle=False,
             num_workers=args.n_workers,
         )
 
@@ -199,8 +251,8 @@ def main():
             eval_loader = val_loader
         else: # Test
             eval_loader = torch.utils.data.DataLoader(WeatherDataset(args.dataset,
-                pred_length=max_pred_length, split="test",
-                subsample_step=subsample_step, subset=bool(args.subset_ds)),
+                pred_length=max_pred_length, split="test", subsample_step=subsample_step,
+                subset=bool(args.subset_ds),return_metadata=True),
             args.batch_size, shuffle=False, num_workers=args.n_workers)
 
         print(f"Running evaluation on {args.eval}")
