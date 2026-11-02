@@ -583,6 +583,39 @@ variables must be present in it. The cache's physical-unit prediction and
 target arrays are scored with MAE/RMSE, normalized MAE/RMSE, persistence
 errors, and persistence skill according to the requested metrics.
 
+### Compare forecasts at a specific location
+
+Use the point-comparison tool to extract forecasts from the completed caches
+at the grid cell nearest a geographic coordinate. By default, it compares the
+four production model IDs on the validation split at Grimstad, Norway:
+
+```powershell
+.\.venv\Scripts\python.exe -m neural_lam.evaluation.point_comparison `
+  --cache-dir evaluation_results\predictions `
+  --split val `
+  --latitude 58.3405 `
+  --longitude 8.5934 `
+  --output-dir evaluation_results\point_comparisons\grimstad
+```
+
+The tool requires exactly one completed cache per requested model, with the
+same dataset, variable ordering, grid, leads, and initialization/valid times.
+It selects the nearest grid-cell center using great-circle distance; it does
+not interpolate between cells. For the current caches, Grimstad maps to
+`58.25°N, 8.50°E`, about 11.45 km from the requested coordinate. The selected
+cell is not boundary-forced; its land-sea fraction is about 0.435, so it is
+classified as sea by the project's 0.5 threshold.
+
+The output directory contains a per-initialization CSV with forecasts, truth,
+errors, persistence forecasts, and timestamps; a summary CSV with MAE, RMSE,
+normalized errors, bias, and skill against persistence by model, variable, and
+lead; metadata describing the selected cell; and four-panel PNG/PDF comparison
+plots for 2 m temperature, 10 m wind components, and mean sea-level pressure.
+The default extraction includes every cached variable. Use `--variables t2m
+u10 v10` to restrict the CSVs, and `--plot-variables t2m u10` to select which
+variables get figures. Scores describe the nearest ERA5 grid cell, not a
+point observation at the town itself.
+
 Offline evaluation also adds derived 10 m wind-speed records when both
 `u10` and `v10` are selected, plus configured variable-group and lead-group
 summaries. Variable-group scores are unweighted means of the member variables'
