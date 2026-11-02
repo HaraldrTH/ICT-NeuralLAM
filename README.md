@@ -616,6 +616,40 @@ u10 v10` to restrict the CSVs, and `--plot-variables t2m u10` to select which
 variables get figures. Scores describe the nearest ERA5 grid cell, not a
 point observation at the town itself.
 
+For a combined 10 m wind-vector comparison, the generated point-case CSV has
+paired `u10`/`v10` components for each model, initialization, and lead. Derive
+wind speed as `sqrt(u10**2 + v10**2)` and meteorological wind-from direction
+from both components, then compare speed MAE and circular direction error:
+
+```powershell
+.\.venv\Scripts\python.exe -m neural_lam.evaluation.plot_point_wind_vectors `
+  --input-csv evaluation_results\point_comparisons\grimstad\grimstad_point_cases.csv `
+  --output-dir evaluation_results\point_comparisons\grimstad\figures
+```
+
+This writes `grimstad_wind_vector_comparison.png` and `.pdf`, plus per-case
+and per-lead CSVs named `grimstad_wind_vector_cases.csv` and
+`grimstad_wind_vector_metrics.csv`. Direction error is the smallest circular
+angular difference in degrees. Direction is scored when the observed wind is
+at least 0.5 m/s by default; if the observation is windy but a model predicts
+calm wind below that threshold, the direction error is set to 180 degrees.
+The speed panels include MAE and RMSE in m/s, normalized MAE (wind-speed MAE
+divided by the training-split standard deviation of derived wind speed), and
+MAE skill versus persistence. Persistence repeats the latest observed `u10`
+and `v10` components, converts that vector to speed, and scores it against the
+same observed speed and cases; positive skill means the model improves on
+persistence, zero means a tie, and negative skill means persistence is better.
+Direction has the same four kinds of scores: circular-error MAE/RMSE in
+degrees, normalized direction MAE (MAE divided by the maximum circular error
+of 180 degrees), and MAE skill versus persistence direction. Because angles
+are circular, the normalized direction score uses the bounded 180-degree
+angular range rather than a linear training-set standard deviation.
+Persistence direction is calculated from the latest observed component
+vector. Direction scores use identical cases where observed wind speed meets
+the calm cutoff; a calm prediction against a valid windy observation receives
+180 degrees error. Speed metrics include every case. Change the direction
+cutoff with `--calm-threshold`.
+
 Offline evaluation also adds derived 10 m wind-speed records when both
 `u10` and `v10` are selected, plus configured variable-group and lead-group
 summaries. Variable-group scores are unweighted means of the member variables'
