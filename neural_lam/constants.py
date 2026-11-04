@@ -16,7 +16,7 @@ split_times = { # (first, last) time of each split, inclusive
     "val": ("2024-09-18T00", "2025-09-17T18"),
     "test": ("2025-09-18T00", "2026-09-18T12"),
 }
-eval_init_hours = (0, 12) # Hours of day to start forecasts from in val/test
+eval_init_hours = (0, 6, 12, 18) # Hours of day to start forecasts from in val/test
 
 # Variables, (name in zarr store, unit, loss weight)
 # Loss weights loosely follow GraphCast: t2m 1.0, other surface fields 0.1,

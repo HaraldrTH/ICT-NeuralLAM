@@ -587,19 +587,23 @@ errors, and persistence skill according to the requested metrics.
 
 Use the point-comparison tool to extract forecasts from the completed caches
 at the grid cell nearest a geographic coordinate. By default, it compares the
-four production model IDs on the validation split at Grimstad, Norway:
+four production model IDs on the test split at Grimstad, Norway:
 
 ```powershell
 .\.venv\Scripts\python.exe -m neural_lam.evaluation.point_comparison `
   --cache-dir evaluation_results\predictions `
-  --split val `
+  --split test `
   --latitude 58.3405 `
   --longitude 8.5934 `
-  --output-dir evaluation_results\point_comparisons\grimstad
+  --output-dir evaluation_results\point_comparisons\grimstad\test
 ```
 
 The tool requires exactly one completed cache per requested model, with the
 same dataset, variable ordering, grid, leads, and initialization/valid times.
+Create those caches by evaluating each production checkpoint with
+`evaluation_configs/evaluation.yaml` (which requests `split: test`), without
+`--subset_ds 1` for the full available test split. The test-cache provenance is
+checked; validation caches are not used in this comparison.
 It selects the nearest grid-cell center using great-circle distance; it does
 not interpolate between cells. For the current caches, Grimstad maps to
 `58.25°N, 8.50°E`, about 11.45 km from the requested coordinate. The selected
@@ -611,6 +615,25 @@ errors, persistence forecasts, and timestamps; a summary CSV with MAE, RMSE,
 normalized errors, bias, and skill against persistence by model, variable, and
 lead; metadata describing the selected cell; and four-panel PNG/PDF comparison
 plots for 2 m temperature, 10 m wind components, and mean sea-level pressure.
+It also writes pairwise relative MAE-reduction results by variable and lead.
+The `grimstad_point_macro_metrics.csv` and
+`grimstad_mean_normalized_mae_comparison` plot report the equal-weighted mean
+normalized MAE across the included variables, separately at each lead. The
+`grimstad_point_pairwise_overall.csv` reports each model pair's relative
+reduction in that equal-variable, equal-lead mean error. Positive reduction
+means the compared model has lower error than the baseline model.
+
+Normalized MAE is MAE divided by that variable's training-split standard
+deviation, so it is unitless and permits scale-aware comparisons across
+variables; it is **not** a percentage of accuracy. For a direct pairwise
+statement on one variable and lead, relative MAE reduction is
+`100 * (1 - compared_model_normalized_MAE / baseline_model_normalized_MAE)`.
+The macro result gives each cached variable and lead equal weight; it is a
+descriptive aggregate, not a universal measure of weather quality. Also inspect
+per-variable scores and persistence skill. In particular, precipitation's
+meaning depends on the one-hour `tp` sample semantics and should not be
+interpreted as a six-hour accumulation score.
+
 The default extraction includes every cached variable. Use `--variables t2m
 u10 v10` to restrict the CSVs, and `--plot-variables t2m u10` to select which
 variables get figures. Scores describe the nearest ERA5 grid cell, not a
@@ -623,8 +646,8 @@ from both components, then compare speed MAE and circular direction error:
 
 ```powershell
 .\.venv\Scripts\python.exe -m neural_lam.evaluation.plot_point_wind_vectors `
-  --input-csv evaluation_results\point_comparisons\grimstad\grimstad_point_cases.csv `
-  --output-dir evaluation_results\point_comparisons\grimstad\figures
+  --input-csv evaluation_results\point_comparisons\grimstad\test\grimstad_point_cases.csv `
+  --output-dir evaluation_results\point_comparisons\grimstad\test\figures
 ```
 
 This writes `grimstad_wind_vector_comparison.png` and `.pdf`, plus per-case

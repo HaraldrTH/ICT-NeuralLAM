@@ -13,9 +13,11 @@ from neural_lam.evaluation.normalization import (
 
 
 DEFAULT_INPUT = Path(
-    "evaluation_results/point_comparisons/grimstad/grimstad_point_cases.csv"
+    "evaluation_results/point_comparisons/grimstad/test/grimstad_point_cases.csv"
 )
-DEFAULT_OUTPUT_DIR = Path("evaluation_results/point_comparisons/grimstad/figures")
+DEFAULT_OUTPUT_DIR = Path(
+    "evaluation_results/point_comparisons/grimstad/test/figures"
+)
 CASE_COLUMNS = (
     "model_id",
     "checkpoint_id",

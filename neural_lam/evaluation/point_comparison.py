@@ -2,6 +2,7 @@
 
 import argparse
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -154,6 +155,98 @@ def _point_summary(case_records, std_by_variable):
         1.0 - summary["rmse"] / summary["persistence_rmse"]
     ).where(summary["persistence_rmse"] > 0)
     return frame, summary
+
+
+def summarize_model_comparisons(summary_frame):
+    """Return macro normalized errors and pairwise relative MAE reductions."""
+    model_ids = summary_frame["model_id"].drop_duplicates().tolist()
+    if len(model_ids) < 2:
+        raise ValueError("At least two models are required for pairwise comparisons")
+
+    scores = summary_frame.pivot(
+        index=["variable", "lead_hours"],
+        columns="model_id",
+        values="normalized_mae",
+    )
+    if scores[model_ids].isna().any().any():
+        raise ValueError("Models must have matching variables and forecast leads")
+
+    pairwise_records = []
+    for baseline, compared in combinations(model_ids, 2):
+        baseline_scores = scores[baseline]
+        compared_scores = scores[compared]
+        reductions = (
+            100.0 * (1.0 - compared_scores / baseline_scores)
+        ).where(baseline_scores > 0)
+        pairwise_records.extend(
+            {
+                "baseline_model": baseline,
+                "compared_model": compared,
+                "variable": variable,
+                "lead_hours": int(lead_hours),
+                "baseline_normalized_mae": float(baseline_scores.loc[(variable, lead_hours)]),
+                "compared_normalized_mae": float(compared_scores.loc[(variable, lead_hours)]),
+                "relative_mae_reduction_pct": float(
+                    reductions.loc[(variable, lead_hours)]
+                ),
+            }
+            for variable, lead_hours in scores.index
+        )
+
+    overall_scores = summary_frame.groupby("model_id")["normalized_mae"].mean()
+    overall_records = [
+        {
+            "baseline_model": baseline,
+            "compared_model": compared,
+            "baseline_mean_normalized_mae": float(overall_scores[baseline]),
+            "compared_mean_normalized_mae": float(overall_scores[compared]),
+            "relative_mae_reduction_pct": (
+                float(100.0 * (1.0 - overall_scores[compared] / overall_scores[baseline]))
+                if overall_scores[baseline] > 0
+                else np.nan
+            ),
+            "aggregation": "equal mean across all included variables and leads",
+        }
+        for baseline, compared in combinations(model_ids, 2)
+    ]
+    macro_summary = (
+        summary_frame.groupby(["model_id", "lead_hours"], sort=True, as_index=False)
+        .agg(
+            mean_normalized_mae=("normalized_mae", "mean"),
+            variable_count=("variable", "nunique"),
+        )
+    )
+    return (
+        macro_summary,
+        pd.DataFrame.from_records(pairwise_records),
+        pd.DataFrame.from_records(overall_records),
+    )
+
+
+def plot_macro_normalized_mae(macro_summary, output_dir):
+    """Plot equal-variable mean normalized MAE for direct model comparison."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    for model_id in macro_summary["model_id"].drop_duplicates():
+        model_rows = macro_summary[macro_summary["model_id"] == model_id]
+        axis.plot(
+            model_rows["lead_hours"],
+            model_rows["mean_normalized_mae"],
+            marker="o",
+            linewidth=1.8,
+            label=model_id,
+        )
+    axis.set_title("Grimstad equal-variable mean normalized MAE")
+    axis.set_xlabel("Forecast lead (hours)")
+    axis.set_ylabel("Mean across variables of MAE / training standard deviation")
+    axis.grid(True, alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    stem = "grimstad_mean_normalized_mae_comparison"
+    figure.savefig(output_dir / f"{stem}.png", dpi=180, bbox_inches="tight")
+    figure.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
+    plt.close(figure)
 
 
 def extract_point_results(
@@ -435,7 +528,12 @@ def main(argv=None):
         default="evaluation_results/predictions",
         help="Directory containing completed per-model .zarr caches",
     )
-    parser.add_argument("--split", default="val", help="Cache split to compare")
+    parser.add_argument(
+        "--split",
+        default="test",
+        choices=("val", "test"),
+        help="Cache split to compare (default: test)",
+    )
     parser.add_argument(
         "--models",
         nargs="+",
@@ -461,7 +559,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--output-dir",
-        default="evaluation_results/point_comparisons/grimstad",
+        default="evaluation_results/point_comparisons/grimstad/test",
         help="Directory for CSV tables and comparison figures",
     )
     args = parser.parse_args(argv)
@@ -493,6 +591,9 @@ def main(argv=None):
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    macro_summary, pairwise_summary, pairwise_overall = (
+        summarize_model_comparisons(summary_frame)
+    )
     location["normalization"] = (
         "training-split standard deviation; SST uses interior "
         "ocean-dominant training cells"
@@ -502,6 +603,12 @@ def main(argv=None):
     metadata_path = output_dir / "grimstad_point_metadata.json"
     case_frame.to_csv(case_path, index=False)
     summary_frame.to_csv(summary_path, index=False)
+    macro_path = output_dir / "grimstad_point_macro_metrics.csv"
+    pairwise_path = output_dir / "grimstad_point_pairwise_metrics.csv"
+    pairwise_overall_path = output_dir / "grimstad_point_pairwise_overall.csv"
+    macro_summary.to_csv(macro_path, index=False)
+    pairwise_summary.to_csv(pairwise_path, index=False)
+    pairwise_overall.to_csv(pairwise_overall_path, index=False)
     pd.Series(location).to_json(metadata_path, indent=2)
     plot_point_comparison(
         summary_frame,
@@ -509,11 +616,15 @@ def main(argv=None):
         output_dir / "figures",
         location,
     )
+    plot_macro_normalized_mae(macro_summary, output_dir / "figures")
     print(f"Selected cell: ({location['cell_latitude']:.4f}, "
           f"{location['cell_longitude']:.4f}), "
           f"{location['distance_to_target_km']:.2f} km from target")
     print(f"Wrote {len(case_frame)} per-case records to {case_path}")
     print(f"Wrote {len(summary_frame)} summary records to {summary_path}")
+    print(f"Wrote macro normalized metrics to {macro_path}")
+    print(f"Wrote per-variable pairwise comparisons to {pairwise_path}")
+    print(f"Wrote overall pairwise comparisons to {pairwise_overall_path}")
     print(f"Wrote metadata to {metadata_path}")
     print(f"Wrote comparison figures to {output_dir / 'figures'}")
 
