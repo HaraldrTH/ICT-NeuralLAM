@@ -24,12 +24,31 @@ DEFAULT_MODEL_IDS = (
     "HI-LAM",
     "HI-LAM-Parallel",
 )
-DEFAULT_PLOT_VARIABLES = ("t2m", "u10", "v10", "msl")
+DEFAULT_PLOT_VARIABLES = ("t2m", "d2m", "tp", "msl", "sst")
 PLOT_METRICS = (
-    ("mae", "MAE"),
-    ("rmse", "RMSE"),
     ("normalized_mae", "Normalized MAE"),
+    ("normalized_rmse", "Normalized RMSE"),
     ("mae_skill_vs_persistence", "MAE skill vs persistence"),
+    ("rmse_skill_vs_persistence", "RMSE skill vs persistence"),
+)
+WIND_VECTOR_METRICS = PLOT_METRICS
+WIND_CASE_COLUMNS = (
+    "model_id",
+    "checkpoint_id",
+    "dataset",
+    "split",
+    "target_latitude",
+    "target_longitude",
+    "grid_y_index",
+    "grid_x_index",
+    "cell_latitude",
+    "cell_longitude",
+    "distance_to_target_km",
+    "initialization_time_unix_s",
+    "initialization_utc",
+    "valid_time_unix_s",
+    "valid_time_utc",
+    "lead_hours",
 )
 
 
@@ -155,6 +174,237 @@ def _point_summary(case_records, std_by_variable):
         1.0 - summary["rmse"] / summary["persistence_rmse"]
     ).where(summary["persistence_rmse"] > 0)
     return frame, summary
+
+
+def _wind_direction_from_components(u, v):
+    """Return meteorological wind-from direction clockwise from north."""
+    return (np.degrees(np.arctan2(-u, -v)) + 360.0) % 360.0
+
+
+def _circular_absolute_difference(first, second):
+    """Return the smallest absolute angular difference, in degrees."""
+    return np.abs((first - second + 180.0) % 360.0 - 180.0)
+
+
+def derive_wind_vector_cases(
+    point_cases,
+    *,
+    calm_threshold=0.5,
+    wind_speed_training_std=None,
+):
+    """Derive speed and circular direction errors from paired u10/v10 cases."""
+    if not np.isfinite(calm_threshold) or calm_threshold < 0:
+        raise ValueError("calm_threshold must be a finite, non-negative value")
+
+    required = {
+        *WIND_CASE_COLUMNS,
+        "variable",
+        "unit",
+        "prediction",
+        "target",
+        "persistence_prediction",
+    }
+    missing = required - set(point_cases.columns)
+    if missing:
+        raise ValueError(
+            "Point-case data is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    wind = point_cases[point_cases["variable"].isin(("u10", "v10"))].copy()
+    if wind.empty:
+        raise ValueError("Point cases contain no u10/v10 rows")
+    units = wind.groupby("variable")["unit"].agg(lambda values: set(values))
+    for variable in ("u10", "v10"):
+        if units.get(variable) != {"m/s"}:
+            raise ValueError(f"{variable} must be present and use m/s units")
+    if not np.isfinite(
+        wind[["prediction", "target"]].to_numpy(dtype=np.float64)
+    ).all():
+        raise ValueError("Wind component predictions and targets must be finite")
+
+    index_columns = list(WIND_CASE_COLUMNS)
+    if wind.duplicated(index_columns + ["variable"]).any():
+        raise ValueError("Duplicate u10/v10 rows found for a model case")
+    wide = wind.pivot(
+        index=index_columns,
+        columns="variable",
+        values=["prediction", "target", "persistence_prediction"],
+    )
+    expected_columns = {
+        (field, variable)
+        for field in ("prediction", "target", "persistence_prediction")
+        for variable in ("u10", "v10")
+    }
+    if set(wide.columns) != expected_columns:
+        raise ValueError("Every model case must contain both u10 and v10 components")
+    wide.columns = [f"{field}_{variable}" for field, variable in wide.columns]
+    wide = wide.reset_index()
+
+    shared_case_columns = [
+        column for column in WIND_CASE_COLUMNS
+        if column not in {"model_id", "checkpoint_id"}
+    ]
+    for component in ("u10", "v10"):
+        target_wide = wide.pivot(
+            index=shared_case_columns,
+            columns="model_id",
+            values=f"target_{component}",
+        )
+        if not np.allclose(
+            target_wide.to_numpy(dtype=np.float64),
+            target_wide.iloc[:, :1].to_numpy(dtype=np.float64),
+            rtol=0.0,
+            atol=1e-5,
+        ):
+            raise ValueError(f"Observed {component} targets differ between model caches")
+
+    prediction_speed = np.hypot(wide["prediction_u10"], wide["prediction_v10"])
+    observed_speed = np.hypot(wide["target_u10"], wide["target_v10"])
+    persistence_speed = np.hypot(
+        wide["persistence_prediction_u10"],
+        wide["persistence_prediction_v10"],
+    )
+    if wind_speed_training_std is None:
+        datasets = point_cases["dataset"].drop_duplicates().tolist()
+        if len(datasets) != 1:
+            raise ValueError("Point cases must contain exactly one dataset")
+        wind_speed_training_std = compute_derived_training_statistics(
+            datasets[0]
+        )["wind_speed_10m_interior"]["std"]
+    if not np.isfinite(wind_speed_training_std) or wind_speed_training_std <= 0:
+        raise ValueError("wind_speed_training_std must be finite and positive")
+
+    prediction_direction = _wind_direction_from_components(
+        wide["prediction_u10"].to_numpy(dtype=np.float64),
+        wide["prediction_v10"].to_numpy(dtype=np.float64),
+    )
+    observed_direction = _wind_direction_from_components(
+        wide["target_u10"].to_numpy(dtype=np.float64),
+        wide["target_v10"].to_numpy(dtype=np.float64),
+    )
+    persistence_direction = _wind_direction_from_components(
+        wide["persistence_prediction_u10"].to_numpy(dtype=np.float64),
+        wide["persistence_prediction_v10"].to_numpy(dtype=np.float64),
+    )
+
+    direction_valid = observed_speed.to_numpy() >= calm_threshold
+    direction_error = np.full(len(wide), np.nan, dtype=np.float64)
+    direction_error[direction_valid] = _circular_absolute_difference(
+        prediction_direction[direction_valid],
+        observed_direction[direction_valid],
+    )
+    prediction_calm = prediction_speed.to_numpy() < calm_threshold
+    direction_error[direction_valid & prediction_calm] = 180.0
+
+    persistence_direction_error = np.full(len(wide), np.nan, dtype=np.float64)
+    persistence_direction_error[direction_valid] = _circular_absolute_difference(
+        persistence_direction[direction_valid],
+        observed_direction[direction_valid],
+    )
+    persistence_calm = persistence_speed.to_numpy() < calm_threshold
+    persistence_direction_error[direction_valid & persistence_calm] = 180.0
+
+    result = wide[index_columns].copy()
+    result["prediction_speed"] = prediction_speed
+    result["observed_speed"] = observed_speed
+    result["speed_error"] = prediction_speed - observed_speed
+    result["absolute_speed_error"] = np.abs(result["speed_error"])
+    result["squared_speed_error"] = np.square(result["speed_error"])
+    result["persistence_speed"] = persistence_speed
+    result["persistence_speed_error"] = persistence_speed - observed_speed
+    result["persistence_absolute_speed_error"] = np.abs(
+        result["persistence_speed_error"]
+    )
+    result["persistence_squared_speed_error"] = np.square(
+        result["persistence_speed_error"]
+    )
+    result["wind_speed_training_std"] = wind_speed_training_std
+    result["prediction_direction_from_degrees"] = prediction_direction
+    result["observed_direction_from_degrees"] = observed_direction
+    result["persistence_direction_from_degrees"] = persistence_direction
+    result["absolute_direction_error_degrees"] = direction_error
+    result["squared_direction_error_degrees"] = np.square(direction_error)
+    result["persistence_absolute_direction_error_degrees"] = (
+        persistence_direction_error
+    )
+    result["persistence_squared_direction_error_degrees"] = np.square(
+        persistence_direction_error
+    )
+    result["observed_direction_valid"] = direction_valid
+    result["prediction_is_calm"] = prediction_calm
+    result["persistence_is_calm"] = persistence_calm
+    result["calm_threshold_m_per_s"] = calm_threshold
+    return result
+
+
+def summarize_wind_vector_cases(cases):
+    """Summarize wind speed and direction using the standard point metrics."""
+    metric_fields = (
+        (
+            "wind_speed_10m",
+            "m/s",
+            "wind_speed_training_std",
+            "absolute_speed_error",
+            "squared_speed_error",
+            "persistence_absolute_speed_error",
+            "persistence_squared_speed_error",
+        ),
+        (
+            "wind_direction_10m",
+            "degrees",
+            None,
+            "absolute_direction_error_degrees",
+            "squared_direction_error_degrees",
+            "persistence_absolute_direction_error_degrees",
+            "persistence_squared_direction_error_degrees",
+        ),
+    )
+    records = []
+    for (
+        variable,
+        unit,
+        normalization_column,
+        error_column,
+        squared_error_column,
+        persistence_error_column,
+        persistence_squared_error_column,
+    ) in metric_fields:
+        grouped = (
+            cases.groupby(["model_id", "lead_hours"], sort=True, as_index=False)
+            .agg(
+                mae=(error_column, "mean"),
+                mean_squared_error=(squared_error_column, "mean"),
+                persistence_mae=(persistence_error_column, "mean"),
+                persistence_mean_squared_error=(
+                    persistence_squared_error_column,
+                    "mean",
+                ),
+                sample_count=(error_column, "count"),
+            )
+        )
+        grouped["rmse"] = np.sqrt(grouped.pop("mean_squared_error"))
+        grouped["persistence_rmse"] = np.sqrt(
+            grouped.pop("persistence_mean_squared_error")
+        )
+        normalization_std = (
+            float(cases[normalization_column].iloc[0])
+            if normalization_column
+            else 180.0
+        )
+        grouped["variable"] = variable
+        grouped["unit"] = unit
+        grouped["normalization_std"] = normalization_std
+        grouped["normalized_mae"] = grouped["mae"] / normalization_std
+        grouped["normalized_rmse"] = grouped["rmse"] / normalization_std
+        grouped["mae_skill_vs_persistence"] = (
+            1.0 - grouped["mae"] / grouped["persistence_mae"]
+        ).where(grouped["persistence_mae"] > 0)
+        grouped["rmse_skill_vs_persistence"] = (
+            1.0 - grouped["rmse"] / grouped["persistence_rmse"]
+        ).where(grouped["persistence_rmse"] > 0)
+        records.append(grouped)
+    return pd.concat(records, ignore_index=True)
 
 
 def summarize_model_comparisons(summary_frame):
@@ -481,7 +731,6 @@ def plot_point_comparison(summary_frame, variables, output_dir, location):
         variable_rows = summary_frame[summary_frame["variable"] == variable]
         if variable_rows.empty:
             raise ValueError(f"No point metrics available for variable {variable!r}")
-        unit = variable_rows["unit"].iloc[0]
         figure, axes = plt.subplots(2, 2, figsize=(13, 8), sharex=True)
         for axis, (metric, label) in zip(axes.flat, PLOT_METRICS):
             for model_id in model_ids:
@@ -495,14 +744,19 @@ def plot_point_comparison(summary_frame, variables, output_dir, location):
                 )
             axis.set_title(label)
             axis.set_xlabel("Forecast lead (hours)")
-            if metric in {"mae", "rmse"}:
-                axis.set_ylabel(f"{label} ({unit})")
-            else:
-                axis.set_ylabel(label)
+            axis.set_ylabel(
+                "Unitless normalized error"
+                if metric in {"normalized_mae", "normalized_rmse"}
+                else "Skill (1 − model error / persistence error)"
+            )
             axis.grid(True, alpha=0.3)
         axes.flat[0].legend()
+        variable_title = {
+            "wind_speed_10m": "10 m wind speed",
+            "wind_direction_10m": "10 m wind direction",
+        }.get(variable, variable)
         figure.suptitle(
-            f"{variable} at nearest cell to "
+            f"{variable_title} at nearest cell to "
             f"{location['target_latitude']:.4f}°N, "
             f"{location['target_longitude']:.4f}°E "
             f"(cell {location['cell_latitude']:.2f}°, "
@@ -514,6 +768,56 @@ def plot_point_comparison(summary_frame, variables, output_dir, location):
         figure.savefig(output_dir / f"{stem}.png", dpi=180, bbox_inches="tight")
         figure.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
         plt.close(figure)
+
+
+def plot_wind_vector_comparison(summary_frame, cases, output_dir, calm_threshold):
+    """Plot normalized errors and persistence skill for speed and direction."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_ids = summary_frame["model_id"].drop_duplicates().tolist()
+    variable_columns = (
+        ("wind_speed_10m", "10 m wind speed"),
+        ("wind_direction_10m", "10 m wind direction"),
+    )
+    figure, axes = plt.subplots(4, 2, figsize=(14, 14), sharex=True)
+    for column, (variable, variable_title) in enumerate(variable_columns):
+        variable_rows = summary_frame[summary_frame["variable"] == variable]
+        for row, (metric, metric_title) in enumerate(WIND_VECTOR_METRICS):
+            axis = axes[row, column]
+            for model_id in model_ids:
+                model_rows = variable_rows[variable_rows["model_id"] == model_id]
+                axis.plot(
+                    model_rows["lead_hours"],
+                    model_rows[metric],
+                    marker="o",
+                    linewidth=1.8,
+                    label=model_id,
+                )
+            axis.set_title(f"{variable_title}: {metric_title}")
+            axis.set_ylabel(
+                "Unitless normalized error"
+                if metric in {"normalized_mae", "normalized_rmse"}
+                else "Skill (1 − model error / persistence error)"
+            )
+            axis.set_xlabel("Forecast lead (hours)")
+            axis.grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    first = cases.iloc[0]
+    figure.suptitle(
+        "10 m wind-vector comparison at "
+        f"{first['cell_latitude']:.2f}°N, {first['cell_longitude']:.2f}° "
+        f"({first['distance_to_target_km']:.1f} km from target)\n"
+        f"Direction scored when observed speed ≥ {calm_threshold:g} m/s; "
+        "calm predictions receive 180° error"
+    )
+    figure.tight_layout()
+    stem = "grimstad_wind_vector_comparison"
+    png_path = output_dir / f"{stem}.png"
+    pdf_path = output_dir / f"{stem}.pdf"
+    figure.savefig(png_path, dpi=180, bbox_inches="tight")
+    figure.savefig(pdf_path, bbox_inches="tight")
+    plt.close(figure)
+    return png_path, pdf_path
 
 
 def main(argv=None):
@@ -553,8 +857,18 @@ def main(argv=None):
         nargs="+",
         default=None,
         help=(
-            "Variables to plot (default: available variables among "
-            "t2m, u10, v10, msl; otherwise all extracted variables)"
+            "Variables to plot (default: available surface variables among "
+            "t2m, d2m, tp, msl, sst; wind speed/direction are plotted when "
+            "both u10 and v10 are extracted)"
+        ),
+    )
+    parser.add_argument(
+        "--calm-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Observed wind speed threshold in m/s for direction scoring "
+            "(default: 0.5)"
         ),
     )
     parser.add_argument(
@@ -580,7 +894,7 @@ def main(argv=None):
         plot_variables = [
             variable for variable in DEFAULT_PLOT_VARIABLES
             if variable in available_variables
-        ] or list(available_variables)
+        ]
     missing_plot_variables = set(plot_variables) - set(available_variables)
     if missing_plot_variables:
         parser.error(
@@ -617,6 +931,37 @@ def main(argv=None):
         location,
     )
     plot_macro_normalized_mae(macro_summary, output_dir / "figures")
+    if {"u10", "v10"}.issubset(set(case_frame["variable"])):
+        datasets = case_frame["dataset"].drop_duplicates().tolist()
+        if len(datasets) != 1:
+            parser.error("Point cases must contain exactly one dataset for wind metrics")
+        wind_speed_std = compute_derived_training_statistics(
+            datasets[0]
+        )["wind_speed_10m_interior"]["std"]
+        wind_cases = derive_wind_vector_cases(
+            case_frame,
+            calm_threshold=args.calm_threshold,
+            wind_speed_training_std=wind_speed_std,
+        )
+        wind_summary = summarize_wind_vector_cases(wind_cases)
+        wind_cases_path = output_dir / "grimstad_wind_vector_cases.csv"
+        wind_summary_path = output_dir / "grimstad_wind_vector_metrics.csv"
+        wind_cases.to_csv(wind_cases_path, index=False)
+        wind_summary.to_csv(wind_summary_path, index=False)
+        wind_plot_paths = plot_wind_vector_comparison(
+            wind_summary,
+            wind_cases,
+            output_dir / "figures",
+            args.calm_threshold,
+        )
+        print(f"Wrote {len(wind_cases)} wind-vector cases to {wind_cases_path}")
+        print(f"Wrote wind-vector metrics to {wind_summary_path}")
+        print(f"Wrote wind-vector plots to {wind_plot_paths[0]} and {wind_plot_paths[1]}")
+    elif {"u10", "v10"}.intersection(set(case_frame["variable"])):
+        print(
+            "Skipped wind-vector metrics: include both u10 and v10 with "
+            "--variables to derive wind speed and direction."
+        )
     print(f"Selected cell: ({location['cell_latitude']:.4f}, "
           f"{location['cell_longitude']:.4f}), "
           f"{location['distance_to_target_km']:.2f} km from target")

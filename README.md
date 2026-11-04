@@ -365,9 +365,15 @@ classified as sea by the project's 0.5 threshold.
 The output directory contains a per-initialization CSV with forecasts, truth,
 errors, persistence forecasts, and timestamps; a summary CSV with MAE, RMSE,
 normalized errors, bias, and skill against persistence by model, variable, and
-lead; metadata describing the selected cell; and four-panel PNG/PDF comparison
-plots for 2 m temperature, 10 m wind components, and mean sea-level pressure.
-It also writes pairwise relative MAE-reduction results by variable and lead.
+lead; metadata describing the selected cell; pairwise relative MAE-reduction
+tables; and comparison plots. By default, point plots are generated for
+`t2m`, `d2m`, `tp`, `msl`, and `sst` when present. Each four-panel plot shows
+normalized MAE, normalized RMSE, MAE skill versus persistence, and RMSE skill
+versus persistence—no raw MAE/RMSE panels. When both `u10` and `v10` are in the
+extracted cases, the same command also derives wind speed and direction, saves
+their case and metric CSVs, and generates a combined wind-vector plot with
+those same four metrics for both quantities.
+
 The `grimstad_point_macro_metrics.csv` and
 `grimstad_mean_normalized_mae_comparison` plot report the equal-weighted mean
 normalized MAE across the included variables, separately at each lead. The
@@ -386,44 +392,37 @@ per-variable scores and persistence skill. In particular, precipitation's
 meaning depends on the one-hour `tp` sample semantics and should not be
 interpreted as a six-hour accumulation score.
 
-The default extraction includes every cached variable. Use `--variables t2m
-u10 v10` to restrict the CSVs, and `--plot-variables t2m u10` to select which
-variables get figures. Scores describe the nearest ERA5 grid cell, not a
-point observation at the town itself.
-
-For a combined 10 m wind-vector comparison, the generated point-case CSV has
-paired `u10`/`v10` components for each model, initialization, and lead. Derive
-wind speed as `sqrt(u10**2 + v10**2)` and meteorological wind-from direction
-from both components, then compare speed MAE and circular direction error:
+For example, restrict extraction to variables needed for temperature,
+precipitation, and wind-vector plots, and choose the plotted scalar variables:
 
 ```powershell
-.\.venv\Scripts\python.exe -m neural_lam.evaluation.plot_point_wind_vectors `
-  --input-csv evaluation_results\point_comparisons\grimstad\test\grimstad_point_cases.csv `
-  --output-dir evaluation_results\point_comparisons\grimstad\test\figures
+.\.venv\Scripts\python.exe -m neural_lam.evaluation.point_comparison `
+  --cache-dir evaluation_results\predictions `
+  --split test `
+  --latitude 58.3405 `
+  --longitude 8.5934 `
+  --variables t2m d2m tp msl sst u10 v10 `
+  --plot-variables t2m d2m tp msl sst `
+  --calm-threshold 0.5 `
+  --output-dir evaluation_results\point_comparisons\grimstad\test
 ```
 
-This writes `grimstad_wind_vector_comparison.png` and `.pdf`, plus per-case
-and per-lead CSVs named `grimstad_wind_vector_cases.csv` and
-`grimstad_wind_vector_metrics.csv`. Direction error is the smallest circular
-angular difference in degrees. Direction is scored when the observed wind is
-at least 0.5 m/s by default; if the observation is windy but a model predicts
-calm wind below that threshold, the direction error is set to 180 degrees.
-The speed panels include MAE and RMSE in m/s, normalized MAE (wind-speed MAE
-divided by the training-split standard deviation of derived wind speed), and
-MAE skill versus persistence. Persistence repeats the latest observed `u10`
-and `v10` components, converts that vector to speed, and scores it against the
-same observed speed and cases; positive skill means the model improves on
-persistence, zero means a tie, and negative skill means persistence is better.
-Direction has the same four kinds of scores: circular-error MAE/RMSE in
-degrees, normalized direction MAE (MAE divided by the maximum circular error
-of 180 degrees), and MAE skill versus persistence direction. Because angles
-are circular, the normalized direction score uses the bounded 180-degree
-angular range rather than a linear training-set standard deviation.
-Persistence direction is calculated from the latest observed component
-vector. Direction scores use identical cases where observed wind speed meets
-the calm cutoff; a calm prediction against a valid windy observation receives
-180 degrees error. Speed metrics include every case. Change the direction
-cutoff with `--calm-threshold`.
+The wind-vector plot is named `grimstad_wind_vector_comparison.png/.pdf`;
+the corresponding per-case and per-lead tables are
+`grimstad_wind_vector_cases.csv` and `grimstad_wind_vector_metrics.csv`.
+Wind speed is `sqrt(u10**2 + v10**2)` and wind direction is the meteorological
+wind-from direction. Speed normalization uses the training-split standard
+deviation of derived 10 m wind speed. Direction error is the smallest circular
+angular difference; its MAE/RMSE are normalized by the maximum circular error
+of 180 degrees. Direction is scored only when observed wind speed meets the
+calm threshold; a calm forecast against a valid windy observation receives
+180 degrees error. The skill panels compare each model with persistence
+computed from the latest observed wind components.
+
+Use `--variables` to choose which values are extracted; both `u10` and `v10`
+must be included for the combined wind plot. Use `--plot-variables` to select
+the scalar variables for which figures are generated. Scores describe the
+nearest ERA5 grid cell, not a point observation at the town itself.
 
 Offline evaluation also adds derived 10 m wind-speed records when both
 `u10` and `v10` are selected, plus configured variable-group and lead-group
@@ -849,4 +848,3 @@ Entries 0 in these lists describe edges between the lowest levels 1 and 2.
 # Contact
 If you are interested in machine learning models for LAM, have questions about our implementation or ideas for extending it, feel free to get in touch.
 You can open a github issue on this page, or (if more suitable) send an email to [joel.oskarsson@liu.se](mailto:joel.oskarsson@liu.se).
-
