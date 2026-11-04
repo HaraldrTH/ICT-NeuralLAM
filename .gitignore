@@ -84,3 +84,5 @@ training.log
 hparam_search/
 evaluation_results/
 tests/
+trained_models/
+.DS_Store
