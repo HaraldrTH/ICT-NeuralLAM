@@ -169,12 +169,15 @@ def evaluate_forecast_cache(
     exclude_land_sst=True,
     spatial_regions=None,
     extreme_events=None,
+    initialization_times_unix_s: Optional[Sequence[int]] = None,
 ):
     """Compute configured metrics from cached physical-unit arrays.
 
     Reads one initialization at a time to keep memory use bounded. Normalized
     metrics use the dataset's saved training standard deviations unless
-    ``training_std`` is explicitly supplied.
+    ``training_std`` is explicitly supplied. ``initialization_times_unix_s``
+    restricts scoring to those forecast starts (e.g. to match another
+    forecast system); all of them must be present in the cache.
     """
     group = open_forecast_cache(cache_path)
     cache_info = _validate_cache(group)
@@ -220,6 +223,10 @@ def evaluate_forecast_cache(
         training_std = utils.load_dataset_stats(dataset_name, "cpu")["data_std"]
         if hasattr(training_std, "detach"):
             training_std = training_std.detach().cpu().numpy()
+        # Caches may hold a subset of the variables (e.g. IFS without sst)
+        training_std = np.asarray(training_std)[
+            [constants.param_names.index(name) for name in variable_names]
+        ]
     training_std = np.asarray(training_std, dtype=np.float64).copy()
     if training_std.shape != (len(variable_names),):
         raise ValueError("Training standard deviations must cover all cached variables")
@@ -412,7 +419,30 @@ def evaluate_forecast_cache(
             variable_units=["m/s"],
         )
 
-    for initialization_index in range(cache_info["n_initializations"]):
+    if initialization_times_unix_s is None:
+        initialization_indices = range(cache_info["n_initializations"])
+    else:
+        cache_times = np.asarray(
+            group["initialization_time_unix_s"][:], dtype=np.int64
+        )
+        requested_times = np.unique(
+            np.asarray(initialization_times_unix_s, dtype=np.int64)
+        )
+        missing_times = np.setdiff1d(requested_times, cache_times)
+        if missing_times.size:
+            raise ValueError(
+                f"{missing_times.size} requested initialization times are "
+                "absent from the cache"
+            )
+        initialization_indices = np.flatnonzero(
+            np.isin(cache_times, requested_times)
+        )
+        if not len(initialization_indices):
+            raise ValueError("No initializations selected")
+    n_evaluated_initializations = len(initialization_indices)
+
+    for initialization_index in initialization_indices:
+        initialization_index = int(initialization_index)
         prediction_all = np.asarray(
             group["prediction"][initialization_index:initialization_index + 1,
                                 lead_indices, :, :, :],
@@ -660,7 +690,8 @@ def evaluate_forecast_cache(
     return records, {
         "cache_path": str(cache_path),
         "cache_metadata": dict(group.attrs),
-        "n_initializations": cache_info["n_initializations"],
+        "n_initializations": n_evaluated_initializations,
+        "n_initializations_in_cache": cache_info["n_initializations"],
         "n_leads": len(requested_leads),
         "lead_hours": list(requested_leads),
         "variables": list(requested_variables),

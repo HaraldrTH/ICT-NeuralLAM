@@ -351,7 +351,10 @@ four production model IDs on the test split at Grimstad, Norway:
 ```
 
 The tool requires exactly one completed cache per requested model, with the
-same dataset, variable ordering, grid, leads, and initialization/valid times.
+same dataset, grid and leads. Only the variables and initialization times that
+every cache has are compared. If `data/ifs/ifs_hres_<split>.zarr` exists, IFS
+forecasts are included as model `IFS-HRES` (see
+[IFS HRES baseline](#ifs-hres-baseline-ecmwf); pass `--no-ifs` to leave them out).
 Create those caches by evaluating each production checkpoint with
 `evaluation_configs/evaluation.yaml` (which requests `split: test`), without
 `--subset_ds 1` for the full available test split. The test-cache provenance is
@@ -599,6 +602,100 @@ leads, variables, and valid grid cells. In particular, exclude the
 boundary-forced cells: the model receives reference ERA5 values there during
 rollout, so including them would make both the model evaluation and baseline
 comparison misleading.
+
+## IFS HRES baseline (ECMWF)
+
+ECMWF's operational forecast (IFS HRES) can be added as an extra model in the
+evaluation. Its forecasts are taken from the
+[ECMWF open data](https://www.ecmwf.int/en/forecasts/datasets/open-data)
+archive on AWS (0.25°, the same grid as ERA5, free and without an account),
+converted to the forecast cache format and scored against ERA5 like the
+trained models. The scripts are in `ifs/` and are run from the repository root.
+They need `requests`, `cfgrib` and `eccodes` (all in `requirements.txt`) and
+`data/era5` prepared as described above.
+
+**1. Download**
+
+```
+python ifs/download_ifs.py
+```
+
+By default this downloads the 00, 06, 12 and 18 UTC runs (the same
+initialization hours as the model evaluation, `eval_init_hours` in
+`neural_lam/constants.py`) for every day of the test
+split (`split_times["test"]` in `neural_lam/constants.py`), lead times 6 to
+114 h every 6 h. Only the needed fields are fetched, cropped to the ERA5 grid
+and saved as one file per run in `data/ifs/nordic/ifs_YYYYMMDDHH.npz`
+(about 11 MB each). A run takes about 40 s, so the full test year (1460 runs)
+takes around 16 hours and 16 GB. Runs that are already downloaded are skipped,
+so the script can be stopped and restarted, and failed runs are retried on the
+next start.
+
+Useful options (run with `--help` for all):
+
+* `--start`, `--end`: Run dates, `YYYY-MM-DD` (default: the test split).
+* `--every_n_days`: Only download every n-th day, e.g. `2` halves the time.
+* `--init_hours`: Run hours (default `0 6 12 18`), e.g. `0 12` halves the time.
+* `--max_lead`: Longest lead time (default 114, the same as the model caches).
+
+**2. Preprocess**
+
+```
+python ifs/preprocess_ifs.py
+```
+
+This writes `data/ifs/ifs_hres_test.zarr`, a forecast cache with model id
+`IFS-HRES` in the same format as the model caches in
+`evaluation_results/predictions`. The targets and persistence states are read
+from `data/era5/era5.zarr`, and boundary cells are set to ERA5 like for the
+models (they are excluded from all scores). Use `--overwrite` to rebuild it
+after downloading more runs, and `--split val` for the validation year.
+
+Differences from the ERA5 variables:
+
+* `sst` is not in the open data, so IFS is not scored on it.
+* `z_<level>` is computed from geopotential height as `gh * 9.80665`.
+* ERA5 `tp` at the 6-hourly samples is a 1 h accumulation, while the open data
+  has 3-hourly steps. IFS `tp` is the mean hourly rate over the last 3 h,
+  `(tp(L) - tp(L-3)) / 3`, so precipitation scores are only roughly
+  comparable. Pass `--exclude_tp` to leave it out.
+
+**3. Evaluate**
+
+The IFS cache can be used with the existing evaluation tools like any model
+cache:
+
+```
+# All configured metrics for IFS alone
+python -m neural_lam.evaluation.offline_metrics --cache data/ifs/ifs_hres_test.zarr --config evaluation_configs/evaluation.yaml
+
+# Point comparison: IFS-HRES is added automatically when data/ifs/ifs_hres_<split>.zarr exists
+python -m neural_lam.evaluation.point_comparison --split test --output-dir evaluation_results/point_comparisons/grimstad/test
+```
+
+`point_comparison` takes `--ifs-cache <path>` to use another IFS store and
+`--no-ifs` to leave IFS out. When IFS is included, all models are scored on
+the initializations and variables that every cache has, so `sst` is left out,
+and any runs missing from the IFS download are left out for all models.
+
+To compare IFS and all models over the whole grid on the same forecasts, use:
+
+```
+python ifs/evaluate_ifs.py
+```
+
+It finds the complete model caches for the config's split in
+`evaluation_results/predictions` (or use `--model_caches <path> ...`), keeps
+the initializations, variables and lead times that all of them share, and runs
+the offline evaluation with `evaluation_configs/evaluation.yaml` for each one.
+Results go to `evaluation_results/metrics/ifs_comparison/`: one metrics CSV
+per model, `comparison_metrics.csv` with all of them, and plots of normalized
+RMSE and MAE per variable against lead time, with IFS as a dashed black line.
+
+When interpreting the results, note that IFS starts from ECMWF's own
+operational analysis, not from ERA5, and is scored against ERA5. This
+penalizes IFS somewhat at short lead times compared with models that start
+from ERA5.
 
 
 # Modularity

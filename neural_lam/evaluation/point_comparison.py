@@ -508,7 +508,12 @@ def extract_point_results(
     variables=None,
     training_std=None,
 ):
-    """Read aligned caches and calculate point-level records and summaries."""
+    """Read caches and calculate point-level records and summaries.
+
+    The caches may hold different variable sets and initialization times (e.g.
+    IFS has no sst and only 00/12 UTC starts). Only the variables and
+    initializations present in every cache are compared.
+    """
     if not cache_paths:
         raise ValueError("At least one forecast cache is required")
 
@@ -538,7 +543,20 @@ def extract_point_results(
         raise ValueError("Cache variable names and units have different lengths")
     if len(set(variable_names)) != len(variable_names):
         raise ValueError("Cache variable names must be unique")
-    selected_variables = tuple(variables) if variables else variable_names
+    common_variables = tuple(
+        name for name in variable_names
+        if all(name in group.attrs.get("variable_names", ()) for group in groups.values())
+    )
+    if variables:
+        not_shared = set(variables) - set(common_variables) - (
+            set(variables) - set(variable_names)
+        )
+        if not_shared:
+            raise ValueError(
+                "Requested variables are not present in every cache: "
+                + ", ".join(sorted(not_shared))
+            )
+    selected_variables = tuple(variables) if variables else common_variables
     unknown_variables = set(selected_variables) - set(variable_names)
     if unknown_variables:
         raise ValueError(
@@ -555,7 +573,14 @@ def extract_point_results(
     initializations = np.asarray(
         reference["initialization_time_unix_s"][:], dtype=np.int64
     )
-    valid_times = np.asarray(reference["valid_time_unix_s"][:], dtype=np.int64)
+    for group in groups.values():
+        initializations = np.intersect1d(
+            initializations,
+            np.asarray(group["initialization_time_unix_s"][:], dtype=np.int64),
+        )
+    if not initializations.size:
+        raise ValueError("The caches have no initialization times in common")
+    valid_times = initializations[:, None] + lead_hours[None, :] * 3600
     reference_shape = reference["prediction"].shape
     ny, nx = reference_shape[2:4]
     if latitude.shape != (ny,) or longitude.shape != (nx,):
@@ -569,7 +594,6 @@ def extract_point_results(
         )
 
     common_land_sea_fraction = float(reference["land_sea_mask"][y_index, x_index])
-    selected_indices = [variable_names.index(name) for name in selected_variables]
     std_by_variable = (
         dict(training_std)
         if training_std is not None
@@ -593,12 +617,15 @@ def extract_point_results(
             )
         if metadata.get("dataset") != dataset or metadata.get("split") != split:
             raise ValueError("All caches must use the same dataset and split")
-        if tuple(metadata.get("variable_names", ())) != variable_names:
-            raise ValueError("All caches must use the same variable names and order")
-        if tuple(metadata.get("variable_units", ())) != variable_units:
+        cache_variables = tuple(metadata.get("variable_names", ()))
+        cache_units = dict(zip(cache_variables, metadata.get("variable_units", ())))
+        if any(
+            cache_units[name] != variable_units[variable_names.index(name)]
+            for name in selected_variables
+        ):
             raise ValueError("All caches must use the same variable units")
-        if group["prediction"].shape != reference_shape:
-            raise ValueError("All caches must have identical prediction shapes")
+        if group["prediction"].shape[2:4] != (ny, nx):
+            raise ValueError("All caches must use the same grid")
         for coordinate_name in ("latitude", "longitude", "lead_hours"):
             if not np.array_equal(
                 group[coordinate_name][:], reference[coordinate_name][:]
@@ -606,10 +633,15 @@ def extract_point_results(
                 raise ValueError(
                     f"Cache coordinate {coordinate_name!r} differs between models"
                 )
+        cache_initializations = np.asarray(
+            group["initialization_time_unix_s"][:], dtype=np.int64
+        )
+        init_rows = np.flatnonzero(np.isin(cache_initializations, initializations))
         if not np.array_equal(
-            group["initialization_time_unix_s"][:], initializations
-        ) or not np.array_equal(group["valid_time_unix_s"][:], valid_times):
-            raise ValueError("All caches must have identical forecast timestamps")
+            np.asarray(group["valid_time_unix_s"][:], dtype=np.int64)[init_rows],
+            valid_times,
+        ):
+            raise ValueError(f"Forecast timestamps are inconsistent in the {model_id} cache")
         if bool(group["boundary_mask"][y_index, x_index]):
             raise ValueError(
                 f"Nearest grid cell is boundary-forced in the {model_id} cache"
@@ -620,20 +652,21 @@ def extract_point_results(
         ):
             raise ValueError("Land-sea mask differs between model caches")
 
+        cache_indices = [cache_variables.index(name) for name in selected_variables]
         predictions = np.asarray(
             group["prediction"][:, :, y_index, x_index, :], dtype=np.float64
-        )
+        )[init_rows][:, :, cache_indices]
         targets = np.asarray(
             group["target"][:, :, y_index, x_index, :], dtype=np.float64
-        )
+        )[init_rows][:, :, cache_indices]
         latest = np.asarray(
             group["latest_observed_state"][:, y_index, x_index, :],
             dtype=np.float64,
-        )
+        )[init_rows][:, cache_indices]
         if not (
-            np.isfinite(predictions[:, :, selected_indices]).all()
-            and np.isfinite(targets[:, :, selected_indices]).all()
-            and np.isfinite(latest[:, selected_indices]).all()
+            np.isfinite(predictions).all()
+            and np.isfinite(targets).all()
+            and np.isfinite(latest).all()
         ):
             raise ValueError(f"Non-finite values found at the selected point for {model_id}")
 
@@ -641,7 +674,7 @@ def extract_point_results(
             "checkpoint_id": metadata.get("checkpoint_id"),
             "graph": metadata.get("graph"),
         }
-        for variable, variable_index in zip(selected_variables, selected_indices):
+        for variable_index, variable in enumerate(selected_variables):
             if (
                 variable == "sst"
                 and common_land_sea_fraction >= OCEAN_LAND_FRACTION_THRESHOLD
@@ -716,6 +749,8 @@ def extract_point_results(
         "dataset": dataset,
         "split": split,
         "lead_hours": lead_hours.tolist(),
+        "n_initializations": int(initializations.size),
+        "variables": list(selected_variables),
         "models": model_metadata,
     }
     return case_frame, summary_frame, location
@@ -844,6 +879,19 @@ def main(argv=None):
         default=DEFAULT_MODEL_IDS,
         help="Expected model_id values in the cache metadata",
     )
+    parser.add_argument(
+        "--ifs-cache",
+        default=None,
+        help=(
+            "Preprocessed IFS forecasts to include as model IFS-HRES "
+            "(default: data/ifs/ifs_hres_<split>.zarr, used if it exists)"
+        ),
+    )
+    parser.add_argument(
+        "--no-ifs",
+        action="store_true",
+        help="Do not include IFS forecasts even if the IFS cache exists",
+    )
     parser.add_argument("--latitude", type=float, default=58.3405)
     parser.add_argument("--longitude", type=float, default=8.5934)
     parser.add_argument(
@@ -881,6 +929,16 @@ def main(argv=None):
     if len(set(args.models)) != len(args.models):
         parser.error("--models must not contain duplicates")
     cache_paths = _find_model_caches(args.cache_dir, args.models, args.split)
+    if not args.no_ifs:
+        ifs_cache = Path(args.ifs_cache or f"data/ifs/ifs_hres_{args.split}.zarr")
+        if ifs_cache.exists():
+            ifs_group = open_forecast_cache(ifs_cache)
+            if ifs_group.attrs.get("split") != args.split:
+                parser.error(f"{ifs_cache} is not a {args.split} cache")
+            cache_paths[str(ifs_group.attrs["model_id"])] = ifs_cache
+            print(f"Including IFS forecasts from {ifs_cache}")
+        elif args.ifs_cache:
+            parser.error(f"IFS cache does not exist: {ifs_cache}")
     case_frame, summary_frame, location = extract_point_results(
         cache_paths,
         target_latitude=args.latitude,
