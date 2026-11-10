@@ -627,9 +627,10 @@ split (`split_times["test"]` in `neural_lam/constants.py`), lead times 6 to
 114 h every 6 h. Only the needed fields are fetched, cropped to the ERA5 grid
 and saved as one file per run in `data/ifs/nordic/ifs_YYYYMMDDHH.npz`
 (about 14 MB each). A run takes about a minute, so the full test year
-(1460 runs) takes around a day and 20 GB. Runs that are already downloaded are skipped,
-so the script can be stopped and restarted, and failed runs are retried on the
-next start. Each run fetches about 350 MB of global GRIB messages (about
+(1460 runs) takes around a day and 20 GB. The script can be stopped (Ctrl-C) and
+restarted at any time: finished runs are skipped, and an unfinished or failed
+run continues from the forecast steps it already has (kept in
+`data/ifs/grib/ifs_YYYYMMDDHH/` until the run is done). Each run fetches about 350 MB of global GRIB messages (about
 500 GB for the full test year), which are deleted after cropping.
 
 Useful options (run with `--help` for all):

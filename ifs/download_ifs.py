@@ -3,16 +3,19 @@ Download ECMWF IFS HRES forecasts (open data, 0.25 deg) for the ERA5 Nordic grid
 
 Forecasts are read from the ECMWF open data archive, which keeps past runs.
 It is mirrored on Google Cloud (default) and AWS with the same file layout;
-use --source to pick one (the AWS bucket often answers 503 SlowDown). Only the needed GRIB messages are fetched, using the byte offsets in the
-.index file next to each forecast step file. The fields are cropped to the ERA5
+use --source to pick one (the AWS bucket often answers 503 SlowDown). Only the
+needed GRIB messages are fetched, using the byte offsets in the .index file next
+to each forecast step file. The fields are cropped to the ERA5
 grid in data/era5/static/nwp_xy.npy and each run is saved as one compressed
 .npz file:
 
     data/ifs/nordic/ifs_YYYYMMDDHH.npz
 
 The global GRIB file of a run (about 350 MB for leads up to 114 h) is deleted
-after cropping unless --keep_grib is given. Runs that already have an .npz are
-skipped, so the script can be stopped and restarted.
+after cropping unless --keep_grib is given. The script can be stopped (Ctrl-C)
+and restarted at any time: runs that already have an .npz are skipped, and the
+steps of an unfinished run are kept in data/ifs/grib/ifs_YYYYMMDDHH/ so only
+the missing steps are downloaded again.
 
 The open data has no sea surface temperature (sst), so IFS is not scored on sst.
 
@@ -24,7 +27,9 @@ Usage (from the repository root):
 import json
 import os
 import random
+import shutil
 import sys
+import threading
 import time
 import warnings
 from argparse import ArgumentParser
@@ -44,6 +49,8 @@ SOURCES = {
 # Throttling and server errors are retried with backoff, up to MAX_WAIT_S each
 RETRY_STATUS = (429, 500, 502, 503, 504)
 MAX_WAIT_S = 120
+# Set on Ctrl-C, so the worker threads stop between requests
+STOP = threading.Event()
 # 06/18 UTC runs were published as stream "scda" before this date, "oper" after
 SCDA_END = datetime(2026, 5, 12, tzinfo=timezone.utc)
 
@@ -119,6 +126,8 @@ def get(session, url, byte_range=None, retries=10):
                 wait = min(MAX_WAIT_S, max(wait, int(retry_after)))
         except requests.RequestException:
             pass
+        if STOP.is_set():
+            break
         # Jitter, so the parallel requests do not all retry at the same moment
         time.sleep(wait * random.uniform(0.5, 1.5))
     raise RuntimeError(f"Failed to download {url} (last status {status})")
@@ -189,39 +198,49 @@ def download_run(init, args, lat, lon, leads, pool, session):
     for step in tp_steps:
         requests_by_step[step] = {"sfc": ["tp"], "pl": []}
 
-    base_url = SOURCES[args.source]
-    indices = dict(zip(requests_by_step, pool.map(
-            lambda step: get(session, step_url(base_url, init, step) + ".index"),
-            requests_by_step)))
-    missing_steps = [step for step, text in indices.items() if text is None]
-    if missing_steps:
-        raise RuntimeError(f"steps not in archive: {missing_steps}")
-
-    jobs, missing = [], set()
-    for step, params in requests_by_step.items():
-        messages = wanted_messages(indices[step].decode(), params, PRESSURE_LEVELS)
-        names = {name for _, _, name in messages}
-        expected = set(params["sfc"]) | {f"{p}_{level}" for p in params["pl"]
-                for level in PRESSURE_LEVELS}
-        missing |= expected - names
-        url = step_url(base_url, init, step) + ".grib2"
-        jobs += [(url, offset, length) for offset, length, _ in messages]
-
-    def fetch(job):
-        url, offset, length = job
-        data = get(session, url, (offset, offset + length - 1))
-        if data is None or len(data) != length:
-            raise RuntimeError(f"incomplete message from {url}")
-        return data
-
+    # Each step is saved to its own file in step_dir as soon as it is complete,
+    # so an interrupted or failed run continues from the steps it already has
     grib_dir = os.path.join(args.out_dir, "grib")
-    os.makedirs(grib_dir, exist_ok=True)
+    step_dir = os.path.join(grib_dir, f"ifs_{stamp}")
+    os.makedirs(step_dir, exist_ok=True)
+    step_path = lambda step: os.path.join(step_dir, f"step_{step:03d}.grib2")
+    base_url = SOURCES[args.source]
+
+    def download_step(step):
+        """Fetch the wanted messages of one step. Returns the number fetched."""
+        path = step_path(step)
+        if os.path.exists(path):
+            return 0
+        url = step_url(base_url, init, step)
+        index = get(session, url + ".index")
+        if index is None:
+            raise RuntimeError(f"step {step} h not in archive")
+        messages = wanted_messages(index.decode(), requests_by_step[step],
+                PRESSURE_LEVELS)
+        part_path = path + ".part"
+        with open(part_path, "wb") as out:
+            for offset, length, _ in messages:
+                if STOP.is_set():
+                    raise RuntimeError("stopped")
+                data = get(session, url + ".grib2", (offset, offset + length - 1))
+                if data is None or len(data) != length:
+                    raise RuntimeError(f"incomplete message from {url}.grib2")
+                out.write(data)
+        os.replace(part_path, path)
+        return len(messages)
+
+    n_fetched = sum(pool.map(download_step, sorted(requests_by_step)))
+
     grib_path = os.path.join(grib_dir, f"ifs_{stamp}.grib2")
     try:
         with open(grib_path, "wb") as out:
-            for data in pool.map(fetch, jobs):
-                out.write(data)
+            for step in sorted(requests_by_step):
+                with open(step_path(step), "rb") as step_file:
+                    shutil.copyfileobj(step_file, out)
         fields = crop_grib(grib_path, lat, lon)
+        expected = set(SURFACE_PARAMS) | {f"{p}_{level}" for p in PRESSURE_PARAMS
+                for level in PRESSURE_LEVELS}
+        missing = expected - set(fields)
 
         arrays = {"latitude": lat.astype(np.float32),
                 "longitude": lon.astype(np.float32),
@@ -234,12 +253,13 @@ def download_run(init, args, lat, lon, leads, pool, session):
         tmp_path = out_path[:-len(".npz")] + ".tmp.npz"
         np.savez_compressed(tmp_path, **arrays)
         os.replace(tmp_path, out_path)
+        shutil.rmtree(step_dir)
     finally:
         if not args.keep_grib and os.path.exists(grib_path):
             os.remove(grib_path)
 
     note = f" (not in open data: {', '.join(sorted(missing))})" if missing else ""
-    return f"{stamp}: {len(fields)} fields, {len(jobs)} messages{note}"
+    return f"{stamp}: {len(fields)} fields, {n_fetched} messages fetched{note}"
 
 
 def main():
@@ -269,6 +289,12 @@ def main():
             try:
                 print(download_run(init, args, lat, lon, leads, pool, session),
                         flush=True)
+            except KeyboardInterrupt:
+                # Let the workers drop their unfinished steps and exit quickly
+                STOP.set()
+                pool.shutdown(wait=True, cancel_futures=True)
+                print(f"{init:%Y%m%d%H}: stopped, re-run the script to resume")
+                sys.exit(130)
             except Exception as exc:
                 failed.append(init)
                 print(f"{init:%Y%m%d%H}: FAILED ({exc})", flush=True)
