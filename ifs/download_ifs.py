@@ -1,16 +1,16 @@
 """
 Download ECMWF IFS HRES forecasts (open data, 0.25 deg) for the ERA5 Nordic grid.
 
-Forecasts are read from the ECMWF open data archive on AWS
-(https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com), which keeps past
-runs. Only the needed GRIB messages are fetched, using the byte offsets in the
+Forecasts are read from the ECMWF open data archive, which keeps past runs.
+It is mirrored on Google Cloud (default) and AWS with the same file layout;
+use --source to pick one (the AWS bucket often answers 503 SlowDown). Only the needed GRIB messages are fetched, using the byte offsets in the
 .index file next to each forecast step file. The fields are cropped to the ERA5
 grid in data/era5/static/nwp_xy.npy and each run is saved as one compressed
 .npz file:
 
     data/ifs/nordic/ifs_YYYYMMDDHH.npz
 
-The global GRIB file of a run (about 300 MB for leads up to 114 h) is deleted
+The global GRIB file of a run (about 350 MB for leads up to 114 h) is deleted
 after cropping unless --keep_grib is given. Runs that already have an .npz are
 skipped, so the script can be stopped and restarted.
 
@@ -23,6 +23,7 @@ Usage (from the repository root):
 
 import json
 import os
+import random
 import sys
 import time
 import warnings
@@ -36,7 +37,13 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from neural_lam import constants  # noqa: E402
 
-BASE_URL = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"
+SOURCES = {
+    "google": "https://storage.googleapis.com/ecmwf-open-data",
+    "aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+}
+# Throttling and server errors are retried with backoff, up to MAX_WAIT_S each
+RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_WAIT_S = 120
 # 06/18 UTC runs were published as stream "scda" before this date, "oper" after
 SCDA_END = datetime(2026, 5, 12, tzinfo=timezone.utc)
 
@@ -69,6 +76,8 @@ def parse_args():
             help="Output directory (default: data/ifs)")
     parser.add_argument("--static_dir", default=os.path.join("data", "era5", "static"),
             help="Directory with nwp_xy.npy for the target grid")
+    parser.add_argument("--source", choices=sorted(SOURCES), default="google",
+            help="Open data mirror (default: google)")
     parser.add_argument("--connections", type=int, default=8,
             help="Parallel HTTP requests per run (default: 8)")
     parser.add_argument("--keep_grib", action="store_true",
@@ -90,26 +99,35 @@ def match_indices(source, target, name):
     return index
 
 
-def get(session, url, byte_range=None, retries=6):
+def get(session, url, byte_range=None, retries=10):
     """GET with retries on throttling and network errors. None if not found."""
     headers = {"Range": f"bytes={byte_range[0]}-{byte_range[1]}"} if byte_range else {}
+    status = None
     for attempt in range(retries):
+        wait = min(MAX_WAIT_S, 2 ** attempt)
         try:
             response = session.get(url, headers=headers, timeout=60)
-            if response.status_code in (403, 404):
+            status = response.status_code
+            if status in (403, 404):
                 return None
-            if response.status_code in (200, 206):
+            if status in (200, 206):
                 return response.content
+            if status not in RETRY_STATUS:
+                break
+            retry_after = response.headers.get("Retry-After", "")
+            if retry_after.isdigit():
+                wait = min(MAX_WAIT_S, max(wait, int(retry_after)))
         except requests.RequestException:
             pass
-        time.sleep(2 ** attempt)
-    raise RuntimeError(f"Failed to download {url}")
+        # Jitter, so the parallel requests do not all retry at the same moment
+        time.sleep(wait * random.uniform(0.5, 1.5))
+    raise RuntimeError(f"Failed to download {url} (last status {status})")
 
 
-def step_url(init, step):
+def step_url(base_url, init, step):
     stream = "scda" if init.hour in (6, 18) and init < SCDA_END else "oper"
     stamp = init.strftime("%Y%m%d%H%M%S")
-    return (f"{BASE_URL}/{init:%Y%m%d}/{init:%H}z/ifs/0p25/{stream}/"
+    return (f"{base_url}/{init:%Y%m%d}/{init:%H}z/ifs/0p25/{stream}/"
             f"{stamp}-{step}h-{stream}-fc")
 
 
@@ -159,7 +177,7 @@ def crop_grib(path, target_lat, target_lon):
     return fields
 
 
-def download_run(init, args, lat, lon, leads, pool):
+def download_run(init, args, lat, lon, leads, pool, session):
     stamp = init.strftime("%Y%m%d%H")
     out_path = os.path.join(args.out_dir, "nordic", f"ifs_{stamp}.npz")
     if os.path.exists(out_path):
@@ -171,9 +189,9 @@ def download_run(init, args, lat, lon, leads, pool):
     for step in tp_steps:
         requests_by_step[step] = {"sfc": ["tp"], "pl": []}
 
-    session = requests.Session()
+    base_url = SOURCES[args.source]
     indices = dict(zip(requests_by_step, pool.map(
-            lambda step: get(session, step_url(init, step) + ".index"),
+            lambda step: get(session, step_url(base_url, init, step) + ".index"),
             requests_by_step)))
     missing_steps = [step for step, text in indices.items() if text is None]
     if missing_steps:
@@ -186,7 +204,7 @@ def download_run(init, args, lat, lon, leads, pool):
         expected = set(params["sfc"]) | {f"{p}_{level}" for p in params["pl"]
                 for level in PRESSURE_LEVELS}
         missing |= expected - names
-        url = step_url(init, step) + ".grib2"
+        url = step_url(base_url, init, step) + ".grib2"
         jobs += [(url, offset, length) for offset, length, _ in messages]
 
     def fetch(job):
@@ -238,16 +256,24 @@ def main():
         inits += [day + timedelta(hours=h) for h in sorted(args.init_hours)]
         day += timedelta(days=args.every_n_days)
     print(f"Downloading {len(inits)} IFS runs, leads {leads[0]}-{leads[-1]} h, "
-            f"to {args.out_dir}/nordic")
+            f"from {args.source} to {args.out_dir}/nordic")
 
     failed = []
-    with ThreadPoolExecutor(max_workers=args.connections) as pool:
+    session = requests.Session()
+    # One pooled connection per worker thread
+    adapter = requests.adapters.HTTPAdapter(pool_connections=1,
+            pool_maxsize=args.connections)
+    session.mount("https://", adapter)
+    with session, ThreadPoolExecutor(max_workers=args.connections) as pool:
         for init in inits:
             try:
-                print(download_run(init, args, lat, lon, leads, pool), flush=True)
+                print(download_run(init, args, lat, lon, leads, pool, session),
+                        flush=True)
             except Exception as exc:
                 failed.append(init)
                 print(f"{init:%Y%m%d%H}: FAILED ({exc})", flush=True)
+                # Back off before the next run in case the source is throttling
+                time.sleep(MAX_WAIT_S)
 
     if failed:
         print(f"{len(failed)} runs failed, re-run the script to retry them:")

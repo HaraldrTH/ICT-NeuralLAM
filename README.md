@@ -608,7 +608,7 @@ comparison misleading.
 ECMWF's operational forecast (IFS HRES) can be added as an extra model in the
 evaluation. Its forecasts are taken from the
 [ECMWF open data](https://www.ecmwf.int/en/forecasts/datasets/open-data)
-archive on AWS (0.25°, the same grid as ERA5, free and without an account),
+archive (0.25°, the same grid as ERA5, free and without an account),
 converted to the forecast cache format and scored against ERA5 like the
 trained models. The scripts are in `ifs/` and are run from the repository root.
 They need `requests`, `cfgrib` and `eccodes` (all in `requirements.txt`) and
@@ -626,12 +626,16 @@ initialization hours as the model evaluation, `eval_init_hours` in
 split (`split_times["test"]` in `neural_lam/constants.py`), lead times 6 to
 114 h every 6 h. Only the needed fields are fetched, cropped to the ERA5 grid
 and saved as one file per run in `data/ifs/nordic/ifs_YYYYMMDDHH.npz`
-(about 11 MB each). A run takes about 40 s, so the full test year (1460 runs)
-takes around 16 hours and 16 GB. Runs that are already downloaded are skipped,
+(about 14 MB each). A run takes about a minute, so the full test year
+(1460 runs) takes around a day and 20 GB. Runs that are already downloaded are skipped,
 so the script can be stopped and restarted, and failed runs are retried on the
-next start.
+next start. Each run fetches about 350 MB of global GRIB messages (about
+500 GB for the full test year), which are deleted after cropping.
 
 Useful options (run with `--help` for all):
+
+* `--source`: Mirror of the archive, `google` (default) or `aws`. Both have the
+  same files, but the AWS bucket often throttles requests (`503 SlowDown`).
 
 * `--start`, `--end`: Run dates, `YYYY-MM-DD` (default: the test split).
 * `--every_n_days`: Only download every n-th day, e.g. `2` halves the time.
