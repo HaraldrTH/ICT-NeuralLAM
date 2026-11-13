@@ -370,12 +370,20 @@ errors, persistence forecasts, and timestamps; a summary CSV with MAE, RMSE,
 normalized errors, bias, and skill against persistence by model, variable, and
 lead; metadata describing the selected cell; pairwise relative MAE-reduction
 tables; and comparison plots. By default, point plots are generated for
-`t2m`, `d2m`, `tp`, `msl`, and `sst` when present. Each four-panel plot shows
-normalized MAE, normalized RMSE, MAE skill versus persistence, and RMSE skill
-versus persistence—no raw MAE/RMSE panels. When both `u10` and `v10` are in the
-extracted cases, the same command also derives wind speed and direction, saves
-their case and metric CSVs, and generates a combined wind-vector plot with
-those same four metrics for both quantities.
+`t2m`, `d2m`, `tp`, `msl`, and `sst` when present. Each scalar plot shows
+normalized MAE and normalized RMSE side by side. Wind components are retained
+in the CSV results and used to calculate wind speed and direction, but are not
+plotted separately. The derived wind plots show speed and direction at each
+available component pair (10 m and the configured pressure levels).
+
+Add `--include-persistence-skill` to include MAE and RMSE skill-versus-
+persistence plots as well. Without that option, the figures contain only the
+two normalized-error metrics; with it, scalar plots use four panels and wind
+plots use four rows for each of speed and direction. The persistence skill
+values are still calculated and saved in the result tables either way.
+Use a new `--output-dir` when changing plot settings so figures from an earlier
+run (such as separate `u`/`v` plots) are not mistaken for newly generated
+figures; the script does not delete old output files.
 
 The `grimstad_point_macro_metrics.csv` and
 `grimstad_mean_normalized_mae_comparison` plot report the equal-weighted mean
@@ -410,17 +418,19 @@ precipitation, and wind-vector plots, and choose the plotted scalar variables:
   --output-dir evaluation_results\point_comparisons\grimstad\test
 ```
 
-The wind-vector plot is named `grimstad_wind_vector_comparison.png/.pdf`;
-the corresponding per-case and per-lead tables are
-`grimstad_wind_vector_cases.csv` and `grimstad_wind_vector_metrics.csv`.
-Wind speed is `sqrt(u10**2 + v10**2)` and wind direction is the meteorological
-wind-from direction. Speed normalization uses the training-split standard
-deviation of derived 10 m wind speed. Direction error is the smallest circular
-angular difference; its MAE/RMSE are normalized by the maximum circular error
-of 180 degrees. Direction is scored only when observed wind speed meets the
-calm threshold; a calm forecast against a valid windy observation receives
-180 degrees error. The skill panels compare each model with persistence
-computed from the latest observed wind components.
+Wind-vector plots are named
+`grimstad_wind_vector_<level>_comparison.png/.pdf`; the corresponding
+per-case and per-lead tables are `grimstad_wind_vector_cases.csv` and
+`grimstad_wind_vector_metrics.csv`. Wind speed is calculated from each paired
+`u`/`v` component set using `sqrt(u**2 + v**2)`. Direction uses the
+meteorological wind-from convention. Speed normalization uses the
+training-split standard deviation of derived speed at that level. Direction
+error is the smallest circular angular difference; its MAE/RMSE are normalized
+by the maximum circular error of 180 degrees. Direction is scored only when
+observed wind speed meets the calm threshold; a calm forecast against a valid
+windy observation receives 180 degrees error. If
+`--include-persistence-skill` is set, the skill panels compare each model with
+persistence computed from the latest observed wind components.
 
 Use `--variables` to choose which values are extracted; both `u10` and `v10`
 must be included for the combined wind plot. Use `--plot-variables` to select

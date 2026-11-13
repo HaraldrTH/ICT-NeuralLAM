@@ -9,7 +9,13 @@ from neural_lam.weather_dataset import open_store
 
 
 OCEAN_LAND_FRACTION_THRESHOLD = 0.5
-
+WIND_COMPONENT_PAIRS = {
+    "10m": ("u10", "v10"),
+    "500hPa": ("u_500", "v_500"),
+    "700hPa": ("u_700", "v_700"),
+    "850hPa": ("u_850", "v_850"),
+    "925hPa": ("u_925", "v_925"),
+}
 
 def compute_derived_training_statistics(dataset_name, block_size=64):
     """Compute ocean-only SST and interior 10 m wind-speed training statistics.
@@ -27,8 +33,12 @@ def compute_derived_training_statistics(dataset_name, block_size=64):
     interior = ~border_mask
 
     sst_index = constants.param_names.index("sst")
-    u10_index = constants.param_names.index("u10")
-    v10_index = constants.param_names.index("v10")
+    wind_vars = tuple(dict.fromkeys(name for pair in WIND_COMPONENT_PAIRS.values() for name in pair))
+    wind_var_indices = {name: constants.param_names.index(name) for name in wind_vars}
+    selected_var_indices = [sst_index, *(wind_var_indices[name] for name in wind_vars)]
+    block_columns = {name: index + 1 for index, name in enumerate(wind_vars)}
+    wind_totals = {level: [0, 0.0, 0.0] for level in WIND_COMPONENT_PAIRS}
+
     stats = utils.load_dataset_stats(dataset_name, "cpu")
     data_mean = stats["data_mean"].detach().cpu().numpy()
     data_std = stats["data_std"].detach().cpu().numpy()
@@ -39,10 +49,7 @@ def compute_derived_training_statistics(dataset_name, block_size=64):
         if ds.lsm.shape != interior.shape:
             raise ValueError("land-sea mask and border mask grids do not match")
         times = ds.time.values
-        start, end = (
-            np.datetime64(value, "ns")
-            for value in constants.split_times["train"]
-        )
+        start, end = (np.datetime64(value, "ns") for value in constants.split_times["train"])
         training_indices = np.flatnonzero((times >= start) & (times <= end))
         if not len(training_indices):
             raise ValueError(f"No training times found for dataset {dataset_name}")
@@ -62,18 +69,27 @@ def compute_derived_training_statistics(dataset_name, block_size=64):
         wind_squared_sum = 0.0
         for offset in range(0, len(training_indices), block_size):
             indices = training_indices[offset:offset + block_size]
-            block = ds["state"].isel(time=indices, var=[sst_index, u10_index, v10_index]).values
+            block = ds["state"].isel(time=indices, var=selected_var_indices).values
             block = np.asarray(block, dtype=np.float64)
+
             sst_values = block[..., 0][:, valid_sst_mask]
-            wind_speed = np.hypot(block[..., 1], block[..., 2])[:, interior]
-            if not np.isfinite(sst_values).all() or not np.isfinite(wind_speed).all():
-                raise ValueError("Training data contains non-finite evaluation values")
+            if not np.isfinite(sst_values).all():
+                raise ValueError("Training data contains non-finite SST values")
+
             sst_count += sst_values.size
             sst_sum += sst_values.sum(dtype=np.float64)
             sst_squared_sum += np.square(sst_values).sum(dtype=np.float64)
-            wind_count += wind_speed.size
-            wind_sum += wind_speed.sum(dtype=np.float64)
-            wind_squared_sum += np.square(wind_speed).sum(dtype=np.float64)
+
+            for level, (u_name, v_name) in WIND_COMPONENT_PAIRS.items():
+                speed = np.hypot(block[..., block_columns[u_name]],
+                                 block[..., block_columns[v_name]])[:, interior]
+                if not np.isfinite(speed).all():
+                    raise ValueError(f"Training data contains non-finite wind speed at {level}")
+
+                totals = wind_totals[level]
+                totals[0] += speed.size
+                totals[1] += speed.sum(dtype=np.float64)
+                totals[2] += np.square(speed).sum(dtype=np.float64)
 
         def summarize(count, value_sum, squared_sum):
             mean = value_sum / count
@@ -87,17 +103,16 @@ def compute_derived_training_statistics(dataset_name, block_size=64):
             "stats_scope": "training split, all times",
             "sst_ocean_dominant_interior": {
                 **summarize(sst_count, sst_sum, sst_squared_sum),
-                "land_sea_fraction_rule": (
-                    f"land_sea_mask < {OCEAN_LAND_FRACTION_THRESHOLD}"
-                ),
+                "land_sea_fraction_rule": (f"land_sea_mask < {OCEAN_LAND_FRACTION_THRESHOLD}"),
                 "stored_all_grid_mean": float(data_mean[sst_index]),
                 "stored_all_grid_std": float(data_std[sst_index]),
                 "excludes_boundary_cells": True,
             },
-            "wind_speed_10m_interior": {
-                **summarize(wind_count, wind_sum, wind_squared_sum),
-                "derived_from": ["u10", "v10"],
+            **{f"wind_speed_{level}_interior": {
+                **summarize(*totals),
+                "derived_from": list(WIND_COMPONENT_PAIRS[level]),
                 "excludes_boundary_cells": True,
+            }for level, totals in wind_totals.items()
             },
             "boundary_cells_excluded": True,
         }
